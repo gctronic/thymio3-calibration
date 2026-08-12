@@ -6,6 +6,25 @@ Local production test/calibration tool for Thymio 3, with a patched Web Bluetoot
 
 Based on the production page from [Mobsya/thymio3-ts-api](https://github.com/Mobsya/thymio3-ts-api/tree/production), with a vendored/patched API under `vendor/thymio3-api/`.
 
+## Demo
+
+![Thymio 3 Test and Calibration UI](docs/demo-ui.png)
+
+### Typical workflow
+
+1. Run the app locally (`npm run dev`) and open **http://localhost:5173** in Chrome.
+2. Click **Connect to Robot** and select your Thymio 3 in the Web Bluetooth picker.
+3. Live sensors start streaming automatically (proximity, ground, acceleration, color).
+4. Click **Start Calibration** (or **Start Test**).
+   - An overlay shows script upload packet progress.
+   - Sensor streaming is paused during upload, then restored.
+5. Watch the **Standard Output Log** and **Calibration Results** panel.
+   - Success: green panel + `calibration completed successfully!`
+   - Timeout / failure: red LEDs on the robot + `calibration timeout!` in the log
+6. Use **Stop Execution** to halt a running script, or **Disconnect** when finished.
+
+> Web Bluetooth requires a secure context (`localhost` or HTTPS) and a Chromium-based browser. A physical Thymio 3 is required — the UI alone cannot simulate calibration.
+
 ## Fixes vs upstream
 
 - Default write MTU **182** (instead of 500), connect-time probe, and MTU halving fallback
@@ -38,6 +57,7 @@ src/main.js              # UI + upload flow
 src/scripts/test.py      # production test script
 src/scripts/calib.py     # production calibration script
 vendor/thymio3-api/      # patched Thymio 3 TS API
+docs/demo-ui.png         # README demo screenshot
 ```
 
 ## Notes
