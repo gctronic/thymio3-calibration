@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Thymio 3 Test and Calibration</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="upload-overlay">
+    <div class="spinner"></div>
+    <div id="upload-status-text">Uploading Python Script...</div>
+    <div id="upload-progress-text"></div>
+  </div>
+
+  <div class="container">
+    <div class="version">v.local-gatt-fix</div>
+    <div class="header">
+      <h2>Thymio 3 Test and Calibration</h2>
+      <div id="connection-status" class="status-disconnected">Disconnected</div>
+    </div>
+
+    <div class="controls">
+      <button id="btn-connect">Connect to Robot</button>
+      <button id="btn-disconnect" class="stop">Disconnect</button>
+    </div>
+
+    <div class="controls action-bar">
+      <button id="btn-test">Start Test</button>
+      <button id="btn-calib">Start Calibration</button>
+      <button id="btn-stop" class="stop">Stop Execution</button>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h3>Live Sensors</h3>
+        <div class="sensor-row"><span>Proximity (0-6):</span> <strong id="lbl-prox">-</strong></div>
+        <div class="sensor-row"><span>Ground (0-1):</span> <strong id="lbl-ground">-</strong></div>
+        <div class="sensor-row"><span>Acceleration (X, Y, Z):</span> <strong id="lbl-accel">-</strong></div>
+        <div class="sensor-row"><span>Color Raw (R, G, B, Clear):</span> <strong id="lbl-color">-</strong></div>
+      </div>
+
+      <div class="panel" id="calibration-panel">
+        <h3 id="calibration-title">Calibration Results</h3>
+        <div id="calibration-results-container">
+          <div class="placeholder">...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel log-panel">
+      <h3>Standard Output Log</h3>
+      <pre id="std-out-output">Waiting for data...</pre>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

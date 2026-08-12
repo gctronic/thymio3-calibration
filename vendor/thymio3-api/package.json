@@ -1,0 +1,19 @@
+{
+  "name": "@local/thymio3-api",
+  "version": "0.0.13-calib",
+  "description": "Patched Thymio 3 API for reliable calibration script upload",
+  "type": "module",
+  "main": "./src/thymio.ts",
+  "module": "./src/thymio.ts",
+  "types": "./src/thymio.ts",
+  "exports": {
+    ".": "./src/thymio.ts"
+  },
+  "dependencies": {
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/web-bluetooth": "^0.0.21",
+    "typescript": "^5.9.3"
+  }
+}
