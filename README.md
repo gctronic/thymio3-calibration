@@ -58,10 +58,15 @@ src/scripts/test.py      # production test script
 src/scripts/calib.py     # production calibration script
 vendor/thymio3-api/      # patched Thymio 3 TS API
 docs/demo-ui.png         # README demo screenshot
+docs/arena-A4-v2.pdf     # print this to build the test arena
 ```
+
+## Test arena
+
+Print [`docs/arena-A4-v2.pdf`](docs/arena-A4-v2.pdf) (A4) to assemble the physical calibration arena (corridor + ground stripe markings).
 
 ## Notes
 
 - Prefer Chrome. Safari does not support Web Bluetooth.
 - Keep the robot close during script upload.
-- Color calibration is saved during the run; ground / motors / gyro / distance are saved at the end only if their values left the “not calibrated” defaults. Timeouts abort remaining steps.
+- Successful calibrations are saved to flash; failed / unreached items are not. The final log report lists `SAVED` / `NOT SAVED` per item.

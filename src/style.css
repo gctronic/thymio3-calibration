@@ -118,6 +118,26 @@ h3 {
   font-size: 14px;
 }
 
+.calib-data.fail-reason {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  background: #ffcdd2;
+  border: 1px solid #c62828;
+  border-radius: 4px;
+  padding: 10px;
+  margin-bottom: 10px;
+  white-space: normal;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.calib-data.fail-reason strong {
+  color: #b71c1c;
+  font-weight: 600;
+}
+
 .placeholder {
   color: #666;
   font-style: italic;

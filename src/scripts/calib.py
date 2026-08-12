@@ -11,6 +11,8 @@ GROUND_BLACK_THR = 452
 GROUND_WHITE_THR = 572
 OPEN_LOOP_DELAY = 600
 TIMEOUT_SEC = 2000 # based on 10 ms tick
+GYRO_TIMEOUT_SEC = 16000 # find line + 4 slower turns
+GYRO_ROT_SPEED = 125  # slower spin during gyro stripe calibration
 LED_BRIGHTNESS = 8
 
 mot = thymio.MOTORS()
@@ -40,7 +42,15 @@ speed_sum_left = 0
 speed_sum_right = 0
 mot_left_right_diff_perc = 0
 
-imu_angle_diff = 360
+imu_angle_diff = 0  # firmware GyroRotFactor; default 0 → 90° = 16383 raw
+GYRO_RAW_90 = 16383  # firmware ROTATION_ANGLE_90 (0x3FFF)
+GYRO_TURNS = 4  # full revolutions via left ground IR after first line
+# Firmware: rotation_angle_90_ = 16383 + GyroRotFactor
+# Stripe: expected_raw = N*4*16383; factor = (raw - expected)/(4N)
+
+gyro_turn_count = 0
+gyro_synced = 0
+gyro_prev_black = 0
 
 calib_mot_fw_state = 0
 calib_mot_fw_num_rows = 0
@@ -63,10 +73,22 @@ delta = 0
 calib_state = 0
 state_counter = 0
 calib_timeout_counter = 0
+fail_reason = ""
+fail_state = -1
+
+# Per-item success: only successful calibrations are saved to flash
+ok_color_white = 0
+ok_gyro = 0
+ok_mot_lr = 0
+ok_ground = 0
+ok_color_black = 0
+ok_mot_dist_fw = 0
+ok_mot_dist_bw = 0
 
 while 1:
 
-    if calib_state == 0: # ground white + color white
+
+    if calib_state == 0: # ground white + color white, then gyro at start
         mot.set_straight_calibration(256, 256) # reset calibration
         # ground
         ground_white[0] = g0.reflected() - g0.ambient()
@@ -77,10 +99,93 @@ while 1:
             ground_white[1] = 0     
         # color
         color.calibrate_and_save_white()
+        ok_color_white = 1
 
-        mot.set_speed(CALIB_LR_MOT_SPEED, CALIB_LR_MOT_SPEED)
-        calib_state = 1
+        # Gyro at start: find floor line (g0), then N turns, set GyroRotFactor
+        gyro_turn_count = 0
+        gyro_synced = 0
+        gyro_ir = g0.reflected() - g0.ambient()
+        if gyro_ir < 0:
+            gyro_ir = 0
+        gyro_prev_black = 1 if (gyro_ir < GROUND_BLACK_THR) else 0
+        mot.set_speed(-GYRO_ROT_SPEED, GYRO_ROT_SPEED)  # CCW until first ground line
+        calib_timeout_counter = 0
+        calib_state = 20
         #print("ground white = " + str(ground_white))
+
+    elif calib_state == 20: # find line → factor 0 + reset → N turns → factor=(raw-expected)/(4N)
+        calib_timeout_counter = calib_timeout_counter + 1
+        if calib_timeout_counter >= GYRO_TIMEOUT_SEC:
+            mot.set_speed(0, 0)
+            rgb_fl.set_intensity(LED_BRIGHTNESS, 0, 0)
+            rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
+            rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
+            rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 20
+            fail_reason = "Gyro stripe turns timed out (left ground IR did not see " + str(GYRO_TURNS) + " full turns). synced=" + str(gyro_synced) + " turns=" + str(gyro_turn_count)
+            calib_state = 15
+            continue
+
+        mot.set_speed(-GYRO_ROT_SPEED, GYRO_ROT_SPEED)
+
+        # Left ground proximity IR only (not color sensor)
+        gyro_ir = g0.reflected() - g0.ambient()
+        if gyro_ir < 0:
+            gyro_ir = 0
+        gyro_black = 1 if (gyro_ir < GROUND_BLACK_THR) else 0
+        if gyro_black == 1 and gyro_prev_black == 0:
+            if gyro_synced == 0:
+                # First ground line: clear factor (nominal 16383/90°) and zero angle
+                imu.set_gyro_scale_calib(0)
+                imu.reset_angle()
+                gyro_synced = 1
+                gyro_turn_count = 0
+            else:
+                gyro_turn_count = gyro_turn_count + 1
+                if gyro_turn_count >= GYRO_TURNS:
+                    mot.set_speed(0, 0)
+                    time.sleep(1.0)
+                    # Firmware: rotation_angle_90 = 16383 + factor
+                    # After N true turns: expected = N*4*16383, factor = (raw-expected)/(4N)
+                    gyro_raw = imu.get_angle_raw()
+                    gyro_expected = GYRO_TURNS * 4 * GYRO_RAW_90
+                    gyro_diff = gyro_raw - gyro_expected
+                    imu_angle_diff = int(gyro_diff / (GYRO_TURNS * 4))
+                    print("gyro raw angle = " + str(gyro_raw))
+                    print("gyro expected raw (N*4*16383) = " + str(gyro_expected))
+                    print("gyro difference (raw - expected) = " + str(gyro_diff))
+                    print("imu GyroRotFactor (diff/(4N)) = " + str(imu_angle_diff))
+                    print("imu rotation_angle_90 (16383+factor) = " + str(GYRO_RAW_90 + imu_angle_diff))
+                    imu.set_gyro_scale_calib(imu_angle_diff)
+                    ok_gyro = 1
+                    imu.reset_angle()
+                    time.sleep(0.2)
+                    # Face corridor: turn right 90° (CW)
+                    imu.rotate_deg(-90, MAX_ROT_SPEED)
+                    calib_timeout_counter = 0
+                    calib_state = 21
+        gyro_prev_black = gyro_black
+
+    elif calib_state == 21: # wait face corridor, then original motor L/R calib
+        calib_timeout_counter = calib_timeout_counter + 1
+        if calib_timeout_counter >= TIMEOUT_SEC:
+            mot.set_speed(0, 0)
+            rgb_fl.set_intensity(LED_BRIGHTNESS, 0, 0)
+            rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
+            rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
+            rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 21
+            fail_reason = "Timed out waiting to face the corridor after gyro (rotate_deg -90)"
+            calib_state = 15
+            continue
+        if imu.rotation_completed():
+            time.sleep(1.0)
+            state_counter = 0
+            speed_sum_left = 0
+            speed_sum_right = 0
+            mot.set_speed(CALIB_LR_MOT_SPEED, CALIB_LR_MOT_SPEED)
+            calib_timeout_counter = 0
+            calib_state = 1
 
     elif calib_state == 1: # motors left/right
         # avoid obstacles (follow the "tunnel")
@@ -107,6 +212,7 @@ while 1:
             left_calib = int(256 + lr_factor)
             right_calib = int(256 - lr_factor)
             mot.set_straight_calibration(left_calib, right_calib)
+            ok_mot_lr = 1
             time.sleep(0.2)
             mot.set_speed(MOT_SPEED_WALL, MOT_SPEED_WALL)
             calib_state = 2
@@ -122,6 +228,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 2
+            fail_reason = "Timed out advancing to end wall (state 2)"
             calib_state = 15 # print calib values
             continue
         if p2.value() >= WALL_THR:
@@ -138,6 +246,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 3
+            fail_reason = "Timed out straightening at end wall (state 3)"
             calib_state = 15 # print calib values
             continue        
         if abs(p1.value() - p3.value()) <= 100: # if the robot is straight enough
@@ -162,12 +272,15 @@ while 1:
         if(ground_black[1] < 0):
             ground_black[1] = 0
         g0.set_calibration_all([ground_black[0], ground_black[1], ground_white[0], ground_white[1]])
+        ok_ground = 1
         # color
         color.calibrate_and_save_black()
+        ok_color_black = 1
 
+        # Gyro already calibrated at start — do not clear scale here
         imu.reset_angle()
-        imu.set_gyro_scale_calib(0)
         imu.rotate_deg(180, MAX_ROT_SPEED) # positive rotation => rotate left
+        calib_timeout_counter = 0
         calib_state = 5
         #print("calib_state = " + str(calib_state))
         #print("ground black = " + str(ground_black))
@@ -180,6 +293,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 5
+            fail_reason = "Timed out waiting for 180° rotation after black (state 5)"
             calib_state = 15 # print calib values
             continue         
         if imu.rotation_completed():
@@ -191,7 +306,7 @@ while 1:
             calib_state = 6
             #print("calib_state = " + str(calib_state))            
     
-    elif calib_state == 6: # gyro scaling calibration
+    elif calib_state == 6: # wall-follow open-loop (original path; gyro set calls removed)
         # avoid obstacles (follow the "tunnel")
         proxSum =  int((p0.value() + p1.value() - p3.value() - p4.value())/10);
         mot.set_speed(CALIB_LR_MOT_SPEED+proxSum, CALIB_LR_MOT_SPEED-proxSum)
@@ -201,16 +316,14 @@ while 1:
         speed_sum_right = speed_sum_right + mot.get_right_speed()
 
         state_counter = state_counter + 1
-        if state_counter >= OPEN_LOOP_DELAY: # enough to have a good estimation of the angle difference between the robot angle after the 180 degree rotation and the expected 180 degrees
+        if state_counter >= OPEN_LOOP_DELAY:
             mot.set_speed(0, 0)
             time.sleep(1.0) # wait a bit to be sure to be completely stopped before continue
-            #print("imu angle = " + str(imu.get_angle_raw()))
-            imu_angle_diff = int(imu.get_angle_raw()/2) # divided by 2 because the robot should have rotated of 180 degrees but if the gyro is not well scaled it can be more or less than 180
-            imu.set_gyro_scale_calib(imu_angle_diff)
+            # gyro factor already set at start — do not call set_gyro_scale_calib here
             mot.set_speed(MOT_SPEED_WALL, MOT_SPEED_WALL)
+            calib_timeout_counter = 0
             calib_state = 7
             #print("calib_state = " + str(calib_state))
-            #print("imu diff angle = " + str(imu_angle_diff))
 
     elif calib_state == 7: # advance till the beginning of the tunnel
         calib_timeout_counter = calib_timeout_counter + 1
@@ -220,6 +333,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 7
+            fail_reason = "Timed out advancing to start wall (state 7)"
             calib_state = 15 # print calib values
             continue         
         if p2.value() >= WALL_THR:
@@ -237,6 +352,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 8
+            fail_reason = "Timed out straightening at start wall (state 8)"
             calib_state = 15 # print calib values
             continue         
         if abs(p1.value() - p3.value()) <= 100: # if the robot is straight enough
@@ -261,6 +378,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 9
+            fail_reason = "Timed out waiting for 180° rotation before distance (state 9)"
             calib_state = 15 # print calib values
             continue         
         if imu.rotation_completed():
@@ -279,6 +398,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 10
+            fail_reason = "Timed out during forward distance calibration (state 10)"
             calib_state = 15 # print calib values
             continue        
         if calib_mot_fw_state == 0:
@@ -309,6 +430,7 @@ while 1:
                 if (calib_mot_fw_num_rows == CALIB_FWBW_NUM_ROWS):
                     mot.set_speed(MOT_SPEED_WALL, MOT_SPEED_WALL)
                     calib_mot_fw_time = sum(calib_mot_fw) // len(calib_mot_fw)
+                    ok_mot_dist_fw = 1
                     mot.distance_calib_timer_pause()
                     calib_timeout_counter = 0
                     calib_state = 11
@@ -334,6 +456,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 11
+            fail_reason = "Timed out advancing to wall after forward distance (state 11)"
             calib_state = 15 # print calib values
             continue        
         if p2.value() >= WALL_THR:
@@ -352,6 +476,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 12
+            fail_reason = "Timed out straightening before backward distance (state 12)"
             calib_state = 15 # print calib values
             continue        
         if abs(p1.value() - p3.value()) <= 100: # if the robot is straight enough
@@ -376,6 +502,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 13
+            fail_reason = "Timed out leaving black zone (state 13)"
             calib_state = 15 # print calib values
             continue        
         if(g0.value() > GROUND_WHITE_THR) and (g1.value() > GROUND_WHITE_THR):
@@ -391,6 +519,8 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
+            fail_state = 14
+            fail_reason = "Timed out during backward distance calibration (state 14)"
             calib_state = 15 # print calib values
             continue        
         if calib_mot_bw_state == 0:
@@ -427,6 +557,7 @@ while 1:
                 if (calib_mot_bw_num_rows == CALIB_FWBW_NUM_ROWS):
                     mot.set_speed(0, 0)
                     calib_mot_bw_time = sum(calib_mot_bw) // len(calib_mot_bw)
+                    ok_mot_dist_bw = 1
                     mot.distance_calib_timer_pause()
                     calib_timeout_counter = 0
                     calib_state = 15
@@ -451,8 +582,11 @@ while 1:
                 calib_mot_bw_state = 1
                 #print("go to state 1 from 2")
     
-    elif calib_state == 15: # print calib values
-        if calib_timeout_counter == 0:
+    elif calib_state == 15: # print calib values + save successful items only
+        if fail_reason != "":
+            print("fail reason = " + fail_reason)
+            print("fail state = " + str(fail_state))
+        if fail_reason == "" and calib_timeout_counter == 0:
             rgb_fl.set_intensity(0, LED_BRIGHTNESS, 0)
             rgb_fr.set_intensity(0, LED_BRIGHTNESS, 0)
             rgb_bl.set_intensity(0, LED_BRIGHTNESS, 0)
@@ -463,31 +597,53 @@ while 1:
             rgb_fr.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_bl.set_intensity(LED_BRIGHTNESS, 0, 0)
             rgb_br.set_intensity(LED_BRIGHTNESS, 0, 0)
-            print("calibration timeout!")        
+            print("calibration failed or timed out!")
+
+        print("=== calibration report (flash save) ===")
+        # Rule: save every successful new calibration; skip only if that item failed / was not reached
+
         print("mot left = " + str(left_calib))
         print("mot right = " + str(right_calib))
-        # mot.set_straight_calibration(left_calib, right_calib) # already done at step 1
-        if left_calib != 0 and right_calib != 0:
+        if ok_mot_lr == 1:
             mot.save_straight_calibration()
-            #pass
-        print("imu scaling = " + str(imu_angle_diff)) 
-        # imu.set_gyro_scale_calib(imu_angle_diff) # already done at step 6
-        if imu_angle_diff != 360:
+            print("mot L/R straight: SAVED to flash")
+        else:
+            print("mot L/R straight: NOT SAVED (calibration failed or not reached)")
+
+        print("imu scaling = " + str(imu_angle_diff))
+        if ok_gyro == 1:
             imu.save_gyro_scale_calib()
-            #pass
+            print("imu gyro scale: SAVED to flash")
+        else:
+            print("imu gyro scale: NOT SAVED (calibration failed or not reached)")
+
         print("mot forward = " + str(calib_mot_fw_time))
         print("mot backward = " + str(calib_mot_bw_time))
-        mot.set_distance_calibration(calib_mot_fw_time, calib_mot_bw_time)
-        if calib_mot_fw_time != 0 and calib_mot_bw_time != 0:
+        if ok_mot_dist_fw == 1 and ok_mot_dist_bw == 1:
+            mot.set_distance_calibration(calib_mot_fw_time, calib_mot_bw_time)
             mot.save_distance_calibration()
-            #pass
-        print("color calib = " + str(color.get_calibration())) # already saved at step 0 and 4
+            print("mot distance fw/bw: SAVED to flash")
+        else:
+            print("mot distance fw/bw: NOT SAVED (calibration failed or not reached; fw_ok=" + str(ok_mot_dist_fw) + " bw_ok=" + str(ok_mot_dist_bw) + ")")
+
+        print("color calib = " + str(color.get_calibration()))
+        if ok_color_white == 1:
+            print("color white: SAVED to flash (during run)")
+        else:
+            print("color white: NOT SAVED (calibration failed or not reached)")
+        if ok_color_black == 1:
+            print("color black: SAVED to flash (during run)")
+        else:
+            print("color black: NOT SAVED (calibration failed or not reached)")
+
         print("ground black = " + str(ground_black))
         print("ground white = " + str(ground_white))
-        #g0.set_calibration_all([ground_black[0], ground_black[1], ground_white[0], ground_white[1]]) # already done at step 4
-        if ground_black[0] != 1023 and ground_black[1] != 1023 and ground_white[0] != 0 and ground_white[1] != 0:
+        if ok_ground == 1:
             g0.save_calibration()
-            #pass
+            print("ground sensors: SAVED to flash")
+        else:
+            print("ground sensors: NOT SAVED (calibration failed or not reached)")
+        print("=== end report ===")
         break
 
     time.sleep(0.01)
