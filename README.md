@@ -8,7 +8,7 @@ Based on the production page from [Mobsya/thymio3-ts-api](https://github.com/Mob
 
 ## Demo
 
-![Thymio 3 Test and Calibration UI](docs/demo-ui.png)
+![Thymio 3 Test and Calibration UI](docs/demo-ui-current.png)
 
 ### Typical workflow
 
@@ -57,7 +57,7 @@ src/main.js              # UI + upload flow
 src/scripts/test.py      # production test script
 src/scripts/calib.py     # production calibration script
 vendor/thymio3-api/      # patched Thymio 3 TS API
-docs/demo-ui.png         # README demo screenshot
+docs/demo-ui-current.png         # README demo screenshot
 docs/arena-A4-v2.pdf     # print this to build the test arena
 ```
 
