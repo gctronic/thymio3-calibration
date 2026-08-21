@@ -1,226 +1,707 @@
-body {
-  font-family: system-ui, sans-serif;
-  background: #f4f4f9;
-  padding: 20px;
-  color: #333;
-  margin: 0;
+/* ==========================================================================
+   Thymio 3 Test and Calibration - production bench UI
+
+   Layout: two columns filling the viewport height.
+     left  : Live Sensors (auto height) above Calibration Results (fills rest)
+     right : Standard Output Log (full height)
+   The page itself never scrolls; only panel bodies do.
+   ========================================================================== */
+
+:root {
+  --bg: #eceff4;
+  --surface: #ffffff;
+  --ink: #16202c;
+  --muted: #5b6a7d;
+  --line: #d8dfe9;
+  --line-soft: #e8edf4;
+
+  --accent: #1976d2;
+  --accent-hover: #1565c0;
+  --stop: #d32f2f;
+  --stop-hover: #b71c1c;
+
+  --ok: #2e7d32;
+  --ok-dark: #1b5e20;
+  --ok-bg: #e8f5e9;
+  --ok-line: #a8d8be;
+
+  --fail: #d32f2f;
+  --fail-dark: #b71c1c;
+  --fail-bg: #ffebee;
+  --fail-line: #eeb3ad;
+
+  /* Third calibration outcome: the run completed but one or more values sit
+     outside their expected production range, or were never reported. */
+  --warn: #ed6c02;
+  --warn-dark: #8a4300;
+  --warn-bg: #fff3e0;
+  --warn-line: #f3c48a;
+
+  --term-bg: #1e1e1e;
+  --term-ink: #d4d4d4;
+
+  --radius: 6px;
+  --gap: 12px;
+
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/* --------------------------------------------------------------------------
+   Shell
+   -------------------------------------------------------------------------- */
+
 .container {
-  max-width: 1000px;
+  height: 100%;
+  max-width: 1800px;
   margin: 0 auto;
-  background: white;
-  padding: 20px;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  padding: 14px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+/* --------------------------------------------------------------------------
+   Header: title on the left, connection controls on the right
+   -------------------------------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  flex: none;
+}
+
+.header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.header-title h1 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
 }
 
 .version {
-  color: #666;
-  font-style: italic;
-  font-size: 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-style: normal;
+  color: var(--muted);
 }
 
-.header {
-  border-bottom: 2px solid #eee;
-  padding-bottom: 10px;
-  margin-bottom: 20px;
+.header-connection {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 8px;
 }
 
-.controls {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
+/* Status pill: the dot is readable at a glance from across the bench. */
+#connection-status {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 11px 5px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
 }
+
+#connection-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.status-connected {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+}
+
+.status-disconnected {
+  color: var(--stop);
+  background: var(--fail-bg);
+  border-color: var(--fail-line);
+}
+
+/* --------------------------------------------------------------------------
+   Action bar
+   -------------------------------------------------------------------------- */
 
 .action-bar {
-  background: #e3f2fd;
-  padding: 10px;
-  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 12px;
 }
+
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 10px;
+  border-right: 1px solid var(--line-soft);
+}
+
+.action-group:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+
+.action-group-end {
+  margin-left: auto;
+}
+
+.action-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Buttons
+   -------------------------------------------------------------------------- */
 
 button {
-  padding: 10px 20px;
-  border: none;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
   border-radius: 5px;
-  background: #1976d2;
-  color: white;
+  padding: 7px 13px;
   cursor: pointer;
-  font-weight: bold;
+  white-space: nowrap;
+  transition: background-color 0.12s ease;
 }
 
-button:hover {
-  background: #1565c0;
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
 }
 
 button:disabled {
-  opacity: 0.55;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-button.stop {
-  background: #d32f2f;
+button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
 }
 
-button.stop:hover {
-  background: #b71c1c;
+button.stop {
+  background: var(--stop);
 }
+
+button.stop:hover:not(:disabled) {
+  background: var(--stop-hover);
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--line-soft);
+  color: var(--ink);
+}
+
+/* Connect and Disconnect are toggled through the hidden attribute in main.js. */
+[hidden] {
+  display: none !important;
+}
+
+/* --------------------------------------------------------------------------
+   Two column grid
+   -------------------------------------------------------------------------- */
 
 .grid {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
+  gap: var(--gap);
+  grid-template-columns: minmax(320px, 1fr) minmax(380px, 1.15fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "sensors log"
+    "calib   log";
 }
 
-@media (max-width: 800px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
+.panel-sensors {
+  grid-area: sensors;
 }
 
-.panel {
-  background: #fafafa;
-  padding: 15px;
-  border-radius: 5px;
-  border: 1px solid #ddd;
+#calibration-panel {
+  grid-area: calib;
 }
 
 .log-panel {
-  margin-top: 20px;
+  grid-area: log;
 }
 
-h3 {
-  margin-top: 0;
-  border-bottom: 1px solid #ccc;
-  padding-bottom: 5px;
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+
+.panel-head h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Google Sheets logging state, driven by setLogStatus() in main.js */
+.log-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-status:empty {
+  display: none;
+}
+
+.log-status.ok {
+  color: var(--ok);
+}
+
+.log-status.error {
+  color: var(--fail);
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 12px 10px;
+}
+
+.panel-body-flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.placeholder {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 14px;
+  padding-top: 6px;
+}
+
+/* --------------------------------------------------------------------------
+   Live sensors and calibration rows
+   -------------------------------------------------------------------------- */
 
 .sensor-row,
 .calib-data {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  padding: 8px 0;
-  border-bottom: 1px solid #eee;
-  font-size: 15px;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
 }
+
+.sensor-row:last-child,
+.calib-data:last-child {
+  border-bottom: none;
+}
+
+.sensor-row span,
+.calib-data span {
+  color: var(--muted);
+  font-size: 12.5px;
+  flex: none;
+}
+
+.sensor-row strong,
+.calib-data strong {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------------------
+   Live sensor values
+
+   Each channel is a fixed width right aligned column (--ch-width is set per
+   row by renderLiveSensor() in main.js), so the digits stay in place instead
+   of shifting sideways every time the stream updates.
+   -------------------------------------------------------------------------- */
 
 .sensor-row strong {
-  color: #2e7d32;
-  font-family: monospace;
+  color: var(--ink);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
-.calib-data {
-  font-family: monospace;
-  font-size: 14px;
+.sensor-row strong .ch {
+  display: inline-block;
+  min-width: var(--ch-width, 4ch);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
-.calib-data.fail-reason {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  background: #ffcdd2;
-  border: 1px solid #c62828;
-  border-radius: 4px;
-  padding: 10px;
-  margin-bottom: 10px;
-  white-space: normal;
-  font-family: system-ui, sans-serif;
-  font-size: 14px;
+/* The channel has hit both ends of its expected range at least once since the
+   last reset: the sensor is proven and the operator can move on. */
+.sensor-row strong .ch.pass {
+  color: var(--ok);
+  font-weight: 700;
 }
 
-.calib-data.fail-reason strong {
-  color: #b71c1c;
+/* Fixed labels are rendered up front: a row with no value yet stays greyed. */
+.calib-data.pending strong {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------
+   Out of range and missing values
+
+   The whole row is tinted so it can be spotted from across the bench, and the
+   individual number that broke its range is boxed. Coupled outputs (ground,
+   imu offsets, color) stay on one row: the operator reads which axis or side
+   is the bad one.
+   -------------------------------------------------------------------------- */
+
+.calib-data.out-of-range,
+.calib-data.missing {
+  background: var(--warn-bg);
+  box-shadow: inset 3px 0 0 var(--warn);
+  padding-left: 9px;
+  padding-right: 6px;
+}
+
+.calib-data.out-of-range span,
+.calib-data.missing span {
+  color: var(--warn-dark);
   font-weight: 600;
 }
 
-.placeholder {
-  color: #666;
-  font-style: italic;
-  font-size: 14px;
+.calib-data.out-of-range strong,
+.calib-data.missing strong {
+  color: var(--warn-dark);
 }
 
-pre {
-  background: #1e1e1e;
-  color: #d4d4d4;
-  padding: 10px;
+.calib-data strong .bad {
+  background: var(--warn);
+  color: #fff;
+  border-radius: 3px;
+  padding: 0 4px;
+  font-weight: 700;
+}
+
+.calib-data.missing strong::after {
+  content: " missing";
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* --------------------------------------------------------------------------
+   Calibration outcome, applied by main.js on #calibration-panel
+   -------------------------------------------------------------------------- */
+
+#calibration-panel.calibration-success {
+  border-color: var(--ok);
+}
+
+#calibration-panel.calibration-success .panel-head {
+  background: var(--ok-bg);
+  border-bottom-color: var(--ok-line);
+}
+
+#calibration-panel.calibration-success .panel-head h3 {
+  color: var(--ok-dark);
+}
+
+#calibration-panel.calibration-failure {
+  border-color: var(--fail);
+}
+
+#calibration-panel.calibration-failure .panel-head {
+  background: var(--fail-bg);
+  border-bottom-color: var(--fail-line);
+}
+
+#calibration-panel.calibration-failure .panel-head h3 {
+  color: var(--fail-dark);
+}
+
+#calibration-panel.calibration-warning {
+  border-color: var(--warn);
+}
+
+#calibration-panel.calibration-warning .panel-head {
+  background: var(--warn-bg);
+  border-bottom-color: var(--warn-line);
+}
+
+#calibration-panel.calibration-warning .panel-head h3 {
+  color: var(--warn-dark);
+}
+
+/* --------------------------------------------------------------------------
+   Notice boxes at the top of the calibration panel
+   -------------------------------------------------------------------------- */
+
+.calib-data.fail-reason,
+.calib-data.warn-reason {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
   border-radius: 5px;
-  max-height: 200px;
-  overflow-y: auto;
+  padding: 9px 10px;
+  margin: 6px 0 10px;
+  white-space: normal;
+  box-shadow: none;
+}
+
+.calib-data.fail-reason {
+  background: var(--fail-bg);
+  border: 1px solid var(--fail);
+}
+
+.calib-data.fail-reason span {
+  color: var(--fail-dark);
+  font-weight: 600;
+}
+
+.calib-data.fail-reason strong {
+  color: var(--fail-dark);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  text-align: left;
+}
+
+.calib-data.warn-reason {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+}
+
+.calib-data.warn-reason span {
+  color: var(--warn-dark);
+  font-weight: 600;
+}
+
+.calib-data.warn-reason strong {
+  color: var(--warn-dark);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  text-align: left;
+}
+
+/* --------------------------------------------------------------------------
+   Output log
+   -------------------------------------------------------------------------- */
+
+#std-out-output {
+  margin: 0;
+  height: 100%;
+  overflow: auto;
+  background: var(--term-bg);
+  color: var(--term-ink);
+  font-family: var(--font-mono);
   font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.calibration-success {
-  background: #e8f5e9 !important;
-  border: 2px solid #2e7d32 !important;
+/* --------------------------------------------------------------------------
+   Error banner
+   -------------------------------------------------------------------------- */
+
+#error-banner {
+  display: none;
+  flex: none;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--fail-bg);
+  border: 1px solid var(--fail);
+  color: var(--fail-dark);
+  font-size: 13px;
 }
 
-.calibration-success h3 {
-  color: #1b5e20 !important;
-  border-bottom-color: #2e7d32 !important;
-}
-
-.calibration-failure {
-  background: #ffebee !important;
-  border: 2px solid #d32f2f !important;
-}
-
-.calibration-failure h3 {
-  color: #b71c1c !important;
-  border-bottom-color: #d32f2f !important;
-}
+/* --------------------------------------------------------------------------
+   Upload overlay
+   -------------------------------------------------------------------------- */
 
 #upload-overlay {
   display: none;
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(255, 255, 255, 0.85);
+  inset: 0;
   z-index: 1000;
-  flex-direction: column;
-  justify-content: center;
+  background: rgba(20, 28, 38, 0.5);
   align-items: center;
-  font-weight: bold;
-  gap: 8px;
+  justify-content: center;
+}
+
+.overlay-card {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 24px 32px;
+  min-width: 300px;
+  text-align: center;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+}
+
+#upload-status-text {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 14px;
+}
+
+#upload-progress-text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+  min-height: 18px;
 }
 
 .spinner {
-  width: 50px;
-  height: 50px;
-  border: 5px solid #f3f3f3;
-  border-top: 5px solid #1976d2;
+  width: 32px;
+  height: 32px;
+  margin: 0 auto;
+  border: 4px solid var(--line);
+  border-top-color: var(--accent);
   border-radius: 50%;
-  animation: spin 1s linear infinite;
-  margin-bottom: 15px;
+  animation: spin 0.85s linear infinite;
 }
 
 @keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-.status-connected {
-  color: #2e7d32 !important;
-  font-weight: bold;
+/* --------------------------------------------------------------------------
+   Responsive fallbacks
+   -------------------------------------------------------------------------- */
+
+/* Not enough width for two comfortable columns: stack everything. */
+@media (max-width: 900px) {
+  html,
+  body {
+    height: auto;
+  }
+
+  .container {
+    height: auto;
+    padding: 12px;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-template-areas:
+      "sensors"
+      "calib"
+      "log";
+  }
+
+  .panel-body {
+    max-height: 340px;
+  }
+
+  #std-out-output {
+    height: 280px;
+  }
+
+  .header-connection {
+    width: 100%;
+  }
+
+  .action-group-end {
+    margin-left: 0;
+  }
 }
 
-.status-disconnected {
-  color: #d32f2f !important;
-  font-weight: bold;
-}
-
-#error-banner {
-  display: none;
-  margin-bottom: 16px;
-  padding: 12px;
-  border-radius: 5px;
-  background: #ffebee;
-  border: 1px solid #d32f2f;
-  color: #b71c1c;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

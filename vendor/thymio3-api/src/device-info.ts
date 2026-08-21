@@ -24,13 +24,23 @@ export async function getFirmwareInfo(
 
       deviceInfoCharacteristic.removeEventListener("characteristicvaluechanged", onResponse);
 
-      const messageLength = view.getUint16(1, true);
-      const data = new Uint8Array(value.buffer, 3);
+      try {
+        // The ATT packet may be longer than the payload, so the body must be
+        // cut at messageLength. Decoding to the end of the buffer feeds
+        // trailing padding to JSON.parse, which throws inside this handler and
+        // leaves the promise pending until the caller's timeout.
+        const messageLength = view.getUint16(1, true);
+        const available = value.buffer.byteLength - 3;
+        const length = Math.min(messageLength, Math.max(0, available));
+        const data = new Uint8Array(value.buffer, 3, length);
 
-      const decoder = new TextDecoder();
-      const firmwareInfoString = decoder.decode(data);
-      const firmwareInfo = JSON.parse(firmwareInfoString) as FirmwareInfo;
-      resolve(firmwareInfo);
+        const decoder = new TextDecoder();
+        const firmwareInfoString = decoder.decode(data);
+        const firmwareInfo = JSON.parse(firmwareInfoString) as FirmwareInfo;
+        resolve(firmwareInfo);
+      } catch (err) {
+        reject(err);
+      }
     };
 
     deviceInfoCharacteristic.addEventListener("characteristicvaluechanged", onResponse);
@@ -62,13 +72,19 @@ export async function getMemoryInfo(
 
       deviceInfoCharacteristic.removeEventListener("characteristicvaluechanged", onResponse);
 
-      const messageLength = view.getUint16(1, true);
-      const data = new Uint8Array(value.buffer, 3);
+      try {
+        const messageLength = view.getUint16(1, true);
+        const available = value.buffer.byteLength - 3;
+        const length = Math.min(messageLength, Math.max(0, available));
+        const data = new Uint8Array(value.buffer, 3, length);
 
-      const decoder = new TextDecoder();
-      const memoryInfoString = decoder.decode(data);
-      const memoryInfo = JSON.parse(memoryInfoString) as MemoryInfo;
-      resolve(memoryInfo);
+        const decoder = new TextDecoder();
+        const memoryInfoString = decoder.decode(data);
+        const memoryInfo = JSON.parse(memoryInfoString) as MemoryInfo;
+        resolve(memoryInfo);
+      } catch (err) {
+        reject(err);
+      }
     };
 
     deviceInfoCharacteristic.addEventListener("characteristicvaluechanged", onResponse);

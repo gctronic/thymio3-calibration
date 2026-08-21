@@ -8,53 +8,88 @@
 </head>
 <body>
   <div id="upload-overlay">
-    <div class="spinner"></div>
-    <div id="upload-status-text">Uploading Python Script...</div>
-    <div id="upload-progress-text"></div>
+    <div class="overlay-card">
+      <div class="spinner"></div>
+      <div id="upload-status-text">Uploading Python Script...</div>
+      <div id="upload-progress-text"></div>
+    </div>
   </div>
 
   <div class="container">
-    <div class="version">v.local-gatt-fix</div>
-    <div class="header">
-      <h2>Thymio 3 Test and Calibration</h2>
-      <div id="connection-status" class="status-disconnected">Disconnected</div>
-    </div>
-
-    <div class="controls">
-      <button id="btn-connect">Connect to Robot</button>
-      <button id="btn-disconnect" class="stop">Disconnect</button>
-    </div>
-
-    <div class="controls action-bar">
-      <button id="btn-test">Start Test</button>
-      <button id="btn-calib">Start Calibration</button>
-      <button id="btn-stop" class="stop">Stop Execution</button>
-    </div>
-
-    <div class="grid">
-      <div class="panel">
-        <h3>Live Sensors</h3>
-        <div class="sensor-row"><span>Proximity (0-6):</span> <strong id="lbl-prox">-</strong></div>
-        <div class="sensor-row"><span>Ground (0-1):</span> <strong id="lbl-ground">-</strong></div>
-        <div class="sensor-row"><span>Acceleration (X, Y, Z):</span> <strong id="lbl-accel">-</strong></div>
-        <div class="sensor-row"><span>Gyro rate raw (X, Y, Z):</span> <strong id="lbl-gyro-rate">-</strong></div>
-        <div class="sensor-row"><span>IMU angle (deg):</span> <strong id="lbl-angle-deg">-</strong></div>
-        <div class="sensor-row"><span>IMU angle raw:</span> <strong id="lbl-angle-raw">-</strong></div>
-        <div class="sensor-row"><span>Color Raw (R, G, B, Clear):</span> <strong id="lbl-color">-</strong></div>
+    <header class="header">
+      <div class="header-title">
+        <h1>Thymio 3 Test and Calibration</h1>
+        <span class="version">21.08.26v1</span>
       </div>
 
-      <div class="panel" id="calibration-panel">
-        <h3 id="calibration-title">Calibration Results</h3>
-        <div id="calibration-results-container">
+      <div class="header-connection">
+        <div id="connection-status" class="status-disconnected">Disconnected</div>
+        <button id="btn-connect">Connect to Robot</button>
+        <button id="btn-disconnect" class="stop" hidden>Disconnect</button>
+      </div>
+    </header>
+
+    <div id="error-banner"></div>
+
+    <div class="action-bar">
+      <div class="action-group">
+        <span class="action-label">Test</span>
+        <button id="btn-test-full">FULL test</button>
+        <button id="btn-test-main">PCB main test</button>
+        <button id="btn-test-low">PCB low test</button>
+        <button id="btn-test-touch">Touch test</button>
+      </div>
+
+      <div class="action-group">
+        <span class="action-label">Calibration</span>
+        <button id="btn-calib">Start Calibration</button>
+      </div>
+
+      <div class="action-group action-group-end">
+        <button id="btn-stop" class="stop">Stop Execution</button>
+      </div>
+    </div>
+
+    <main class="grid">
+      <section class="panel panel-sensors">
+        <div class="panel-head">
+          <h3>Live Sensors</h3>
+        </div>
+        <div class="panel-body">
+          <div class="sensor-row"><span>Proximity (0-6)</span> <strong id="lbl-prox">-</strong></div>
+          <div class="sensor-row"><span>Ground (0-1)</span> <strong id="lbl-ground">-</strong></div>
+          <div class="sensor-row"><span>Acceleration (X, Y, Z)</span> <strong id="lbl-accel">-</strong></div>
+          <div class="sensor-row"><span>Gyro rate raw (X, Y, Z)</span> <strong id="lbl-gyro-rate">-</strong></div>
+          <div class="sensor-row"><span>IMU angle (deg)</span> <strong id="lbl-angle-deg">-</strong></div>
+          <div class="sensor-row"><span>Color raw (R, G, B, Clear)</span> <strong id="lbl-color">-</strong></div>
+        </div>
+      </section>
+
+      <section class="panel" id="calibration-panel">
+        <div class="panel-head">
+          <h3 id="calibration-title">Calibration Results</h3>
+          <span id="log-status" class="log-status"></span>
+        </div>
+        <!-- The fixed calibration rows are rendered by resetCalibrationPanel()
+             in main.js, which owns the label list and the expected ranges. -->
+        <div class="panel-body" id="calibration-results-container">
           <div class="placeholder">...</div>
         </div>
-      </div>
-    </div>
+      </section>
 
-    <div class="panel log-panel">
-      <h3>Standard Output Log</h3>
-      <pre id="std-out-output">Waiting for data...</pre>
-    </div>
+      <section class="panel log-panel">
+        <div class="panel-head">
+          <h3>Standard Output Log</h3>
+          <div class="panel-actions">
+            <button id="btn-log-copy" class="ghost">Copy</button>
+            <button id="btn-log-clear" class="ghost">Clear</button>
+          </div>
+        </div>
+        <div class="panel-body panel-body-flush">
+          <pre id="std-out-output">Waiting for data...</pre>
+        </div>
+      </section>
+    </main>
   </div>
 
   <script type="module" src="/src/main.js"></script>

@@ -3,6 +3,7 @@ import { resolve } from 'path';
 
 export default defineConfig({
   root: '.',
+  base: './',   // relative paths
   server: {
     port: 5173,
     strictPort: true,

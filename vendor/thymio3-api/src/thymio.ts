@@ -44,7 +44,7 @@ export async function requestAndConnect(): Promise<void> {
     ]
   });
 
-  if (!device.name?.startsWith('THYMIO')) {
+  if (!device.name?.startsWith("T3") && !device.name?.startsWith("THYMIO")) {
     device = undefined;
     throw new Error('Not a Thymio device');
   }
