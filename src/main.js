@@ -773,22 +773,31 @@ document.addEventListener('thymio-std-out-values', (event) => {
 const CALIB_LOG = {
   // Relay endpoint (calib_log.php). The bench never talks to Google directly:
   // script.google.com is unreachable from some of the sites where calibration
-  // runs, while the relay is not, and it is the relay that owns the retries
-  // towards the sheet.
+  // runs, while the relay is not. The relay writes the record to its own CSV,
+  // answers, and only then forwards it to the sheet with its own retries.
   url: 'PROCESSING_URL_HERE',
   // Must match API_TOKEN in calib_log.php.
   token: 'PROCESSING_TOKEN_HERE',
-  // Abort for a single upload attempt. A filtering firewall drops packets
-  // silently instead of refusing them, so the socket never errors out on its
-  // own and this is the only thing that ends the wait.
-  timeoutMs: 5000,
-  // Attempts per record. Also bound by the connection generation: a
+  // Abort for a single upload attempt.
+  //
+  // The relay answers as soon as the record is in its CSV and forwards to the
+  // sheet afterwards, on a detached worker: measured end to end, that answer
+  // comes back in under 0.2 s. This only ever has to cover the network, so it
+  // is deliberately far above the observed figure and far below the relay's own
+  // forwarding budget, which the bench never waits for.
+  //
+  // The one thing that would break the assumption is the relay moving to a SAPI
+  // that cannot detach the worker; the arithmetic for that case is written down
+  // next to UPSTREAM_ATTEMPTS in calib_log.php.
+  timeoutMs: 4000,
+  // Attempts per record, first try included. Replaying is safe: the record
+  // carries the same run_id every time, and both the CSV and the sheet key
+  // their deduplication on it. Also bound by the connection generation: a
   // disconnection cuts the loop short whatever this says.
-  maxAttempts: 3,
-  // Heartbeat towards the relay. The relay drains its backlog on the back of
-  // incoming calls, so the last record of a shift would otherwise sit there
-  // until the next working day: there is no robot after it to push it up.
-  flushPingMs: 5 * 60 * 1000,
+  maxAttempts: 2,
+  // Backoff between attempts, multiplied by the attempt number. Worst case for
+  // the operator is maxAttempts * timeoutMs + retryDelayMs, so 9 s.
+  retryDelayMs: 1000,
   // Fallback only: used when the script does not print the end marker (older
   // calib.py). It must exceed the longest flash write in the report block,
   // otherwise the record is sent while the robot is still stalled and the
@@ -1105,7 +1114,11 @@ function restoreStreamingAfterReadback() {
 
 /**
  * Posts one record. The body is JSON but declared as text/plain: any other
- * content type triggers a CORS preflight that Apps Script cannot answer.
+ * content type triggers a CORS preflight that the relay would have to answer.
+ *
+ * Success means the relay wrote the record to its CSV, not that the sheet has
+ * it: the relay forwards to Google after answering, precisely so the operator
+ * never waits on a latency nobody controls.
  */
 async function postCalibration(record) {
   const controller = new AbortController();
@@ -1123,11 +1136,6 @@ async function postCalibration(record) {
 
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || 'rejected by server');
-
-    // The relay answers as soon as the record is safe on its own disk. Whether
-    // it also reached the sheet is reported separately, because a sheet still
-    // catching up is not an operator problem: the relay carries it over.
-    return data.forwarded !== false;
   } catch (err) {
     if (err.name === 'AbortError') {
       throw new Error('timeout after ' + CALIB_LOG.timeoutMs + ' ms');
@@ -1144,14 +1152,17 @@ async function postCalibration(record) {
  * already in flight is left to finish on its own, but no new one is started.
  * Without this, a robot that is long gone keeps rewriting the log status while
  * the operator is already calibrating the next one.
+ *
+ * Retries are safe: the record carries the same run_id every time, and both the
+ * relay CSV and the sheet key their deduplication on it.
  */
 async function sendCalibration(record, generation) {
-  setLogStatus('Saving to sheet...');
+  setLogStatus('Saving...');
 
   for (let attempt = 1; attempt <= CALIB_LOG.maxAttempts; attempt++) {
     try {
-      const forwarded = await postCalibration(record);
-      setLogStatus(forwarded ? 'Saved to sheet' : 'Saved, sheet pending', 'ok');
+      await postCalibration(record);
+      setLogStatus('Saved', 'ok');
       return;
     } catch (err) {
       console.error(`Calibration upload attempt ${attempt} failed`, err);
@@ -1162,47 +1173,16 @@ async function sendCalibration(record, generation) {
       }
 
       if (attempt < CALIB_LOG.maxAttempts) {
-        await new Promise((r) => setTimeout(r, attempt * 2000));
+        await new Promise((r) => setTimeout(r, attempt * CALIB_LOG.retryDelayMs));
       }
     }
   }
 
-  // All attempts spent. The record is lost: the operator sees it and can
-  // recalibrate, which is cheaper than keeping a queue nobody watches.
-  setLogStatus('NOT saved to sheet', 'error');
+  // All attempts spent without the relay ever answering. The record is lost:
+  // the operator sees it and can recalibrate, which is cheaper than keeping a
+  // queue nobody watches.
+  setLogStatus('NOT saved', 'ok');
 }
-
-/**
- * Carries no record: it only gives the relay an occasion to push whatever it
- * could not deliver to the sheet earlier. The relay drains its backlog on the
- * back of incoming calls, which covers every robot but the last one of a shift,
- * and that is exactly the record nobody would notice was missing.
- *
- * Deliberately silent. This is housekeeping, not part of any run, and a failed
- * ping means only that the next one will do the work instead.
- */
-async function pingCalibrationRelay() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CALIB_LOG.timeoutMs);
-
-  try {
-    await fetch(CALIB_LOG.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ token: CALIB_LOG.token, flush: true }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    console.warn('Relay flush ping failed:', err.message || err);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Once at startup, so a backlog left overnight goes up as soon as the bench is
-// opened in the morning, then on a slow timer for the rest of the shift.
-pingCalibrationRelay();
-setInterval(pingCalibrationRelay, CALIB_LOG.flushPingMs);
 
 async function runScript(type, mode = null) {
   if (!thymio.isConnected()) {

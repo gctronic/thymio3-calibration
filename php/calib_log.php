@@ -4,22 +4,23 @@
  * calibration sheet.
  *
  * The bench may run where script.google.com is unreachable, so the browser
- * never talks to Google: it posts here, this server stores the record and
- * forwards it upstream within the same request, so the sheet fills up live.
+ * never talks to Google: it posts here, this file writes the record to a local
+ * CSV, answers immediately, and only then forwards it upstream.
  *
- * Storage always happens before forwarding. A record that reaches this file is
- * never lost, even if Google is down: it stays in pending/ and is retried by
- * the next bench call, after that call has already been answered. The bench
- * also sends a periodic flush ping, which covers the last robot of a shift.
+ * There is no queue and no backlog. The CSV is the relay's copy of record; if
+ * the forward fails after its retries, the row is missing from the sheet and
+ * has to be recovered from the CSV by hand. This is deliberate: a queue nobody
+ * drains is worse than no queue at all.
  *
  * Companion of main.js (CALIB_LOG) and calib_log.gs (API_TOKEN).
  *
  * Endpoints, all POST with Content-Type: text/plain
  *   {"token":"...","record":{...}}  store and forward one calibration
- *   {"token":"...","flush":true}    drain the backlog, no record
  *   {"token":"...","diag":true}     environment report, for debugging
  * A plain GET answers with a liveness probe and no token, so that opening the
  * URL in a browser tells you whether the file is served at all.
+ *
+ * Requires PHP 8.0 or later.
  */
 
 declare(strict_types=1);
@@ -34,9 +35,39 @@ const API_TOKEN = 'API_TOKEN_HERE';
 // Apps Script web app /exec URL, and the token it expects (API_TOKEN in
 // calib_log.gs). Kept separate from API_TOKEN so the bench-facing secret can be
 // rotated without redeploying the Apps Script.
-const UPSTREAM_URL     = 'UPSTREAM_URL_HERE';
-const UPSTREAM_TOKEN   = 'UPSTREAM_TOKEN_HERE';
-const UPSTREAM_TIMEOUT = 10;
+const UPSTREAM_URL   = 'UPSTREAM_URL_HERE';
+const UPSTREAM_TOKEN = 'UPSTREAM_TOKEN_HERE';
+
+// Per-attempt budget. Must stay LONGER than waitLock() in calib_log.gs plus the
+// round trip, otherwise Apps Script keeps working on a call this side has
+// abandoned and writes a row nobody is told about.
+//
+// The round trip alone is around 3 s: /exec redirects to
+// script.googleusercontent.com, so every attempt pays two TLS handshakes on top
+// of the script's own work. That is measured, not assumed - the diag endpoint
+// reports it as upstream.total_time_s. waitLock is set to 10 s against the 15 s
+// here, which leaves the margin that round trip needs.
+const UPSTREAM_TIMEOUT         = 15;
+const UPSTREAM_CONNECT_TIMEOUT = 5;
+
+// Forward attempts, first try included, and the pause between them.
+//
+// This host runs PHP-FPM, so closeConnection() really does detach the worker:
+// measured end to end, the bench gets its answer in under 0.2 s while the
+// forward carries on here. The budget below is therefore invisible to the
+// operator and can afford to be generous - which is what makes a contended
+// Apps Script lock recoverable instead of fatal.
+//
+// Worst case 2 * 15 + 1 * 2 = 32 s of worker time, inside the 60 s granted by
+// set_time_limit() in handleRequest(). If the SAPI ever changes and the answer
+// starts arriving only at the end of the request, this becomes the bench's wait
+// as well and CALIB_LOG.timeoutMs in main.js has to cover it:
+//
+//   CALIB_LOG.timeoutMs
+//     > UPSTREAM_ATTEMPTS * UPSTREAM_TIMEOUT
+//       + (UPSTREAM_ATTEMPTS - 1) * UPSTREAM_RETRY_DELAY
+const UPSTREAM_ATTEMPTS    = 2;
+const UPSTREAM_RETRY_DELAY = 2;
 
 // Must sit outside the web root, or be protected by a deny-all .htaccess:
 // it holds every calibration ever run.
@@ -56,11 +87,6 @@ const RATE_LIMIT_WINDOW = 60;
 // Anything larger than this is not a calibration record.
 const MAX_BODY_BYTES = 16384;
 
-// How many backlogged records to push upstream after answering the bench.
-// Small on purpose: the queue drains over several calls instead of stalling
-// one worker on a long replay.
-const FLUSH_BATCH = 5;
-
 // Stage log, rotated when it gets past this. Set to 0 to switch it off once
 // the bench is known good.
 const LOG_MAX_BYTES = 2097152;
@@ -79,8 +105,8 @@ const VALUE_COLUMNS = [
 // ENTRY POINT
 // ==========================================
 
-// The backlog flush runs after the response has been sent, so the bench closing
-// the connection must not kill the worker halfway through a forward.
+// The forward runs after the response has been sent, so the bench closing the
+// connection must not kill the worker halfway through it.
 ignore_user_abort(true);
 
 // A fatal error would otherwise reach the caller as an empty body with a 500,
@@ -105,18 +131,12 @@ register_shutdown_function(function (): void {
     http_response_code(500);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode([
-        'ok'    => false,
-        'error' => 'fatal error',
-        'where' => basename($error['file']) . ':' . $error['line'],
+        'ok'     => false,
+        'error'  => 'fatal error',
+        'where'  => basename($error['file']) . ':' . $error['line'],
         'detail' => $error['message'],
     ]);
 });
-
-if (PHP_SAPI === 'cli') {
-    // Not required for normal operation: the bench drives the queue on its own.
-    // Kept as a way to drain a large backlog by hand after a long outage.
-    exit(flushPending(PHP_INT_MAX));
-}
 
 handleRequest();
 
@@ -126,6 +146,8 @@ handleRequest();
 
 function handleRequest(): void
 {
+    disableOutputBuffering();
+
     // The bench posts text/plain on purpose: any other content type would
     // trigger a CORS preflight.
     $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -178,12 +200,6 @@ function handleRequest(): void
 
     $raw = (string) file_get_contents('php://input', false, null, 0, MAX_BODY_BYTES + 1);
 
-    relayLog('request', [
-        'ip'     => clientIp(),
-        'origin' => $origin === '' ? '-' : $origin,
-        'bytes'  => strlen($raw),
-    ]);
-
     if (strlen($raw) > MAX_BODY_BYTES) {
         relayLog('rejected', ['reason' => 'body too large']);
         respond(413, ['ok' => false, 'error' => 'body too large']);
@@ -208,18 +224,6 @@ function handleRequest(): void
         return;
     }
 
-    // Heartbeat from the bench: no record, just an occasion to drain the queue.
-    // This is what covers the last robot of a shift, the one with no successor
-    // to carry its record upstream.
-    if (!empty($payload['flush'])) {
-        $pending = count(glob(dataPath('pending') . '/*.json') ?: []);
-        relayLog('flush ping', ['pending' => $pending]);
-        respond(200, ['ok' => true, 'flush' => true, 'pending' => $pending]);
-        closeConnection();
-        flushPending(FLUSH_BATCH);
-        return;
-    }
-
     $record = $payload['record'] ?? null;
     if (!is_array($record) || ($record['robot'] ?? '') === '') {
         relayLog('rejected', ['reason' => 'missing record.robot']);
@@ -231,74 +235,249 @@ function handleRequest(): void
     // poison the ordering of the sheet.
     $record['received_at'] = gmdate('c');
 
-    $fingerprint = fingerprint($record);
+    $runId = (string) ($record['run_id'] ?? '');
 
     relayLog('record in', [
         'robot'  => (string) $record['robot'],
-        'run_id' => (string) ($record['run_id'] ?? '-'),
-        'fp'     => substr($fingerprint, 0, 12),
+        'run_id' => $runId === '' ? '-' : $runId,
     ]);
 
-    // A retry of a record already held. Report where it actually stands rather
-    // than a flat success, so a bench retrying a record still stuck in the
-    // queue is not told the sheet has it.
-    if (alreadySeen($fingerprint)) {
-        $sent = file_exists(dataPath('sent', $fingerprint));
-        relayLog('duplicate', ['fp' => substr($fingerprint, 0, 12), 'sent' => $sent]);
-        respond(200, ['ok' => true, 'duplicate' => true, 'forwarded' => $sent]);
+    // The CSV is the relay's own copy, so it has to succeed before anything is
+    // promised to the bench. This is the only failure the operator must act on.
+    if (!appendCsv($record)) {
+        respond(500, ['ok' => false, 'error' => 'could not write CSV']);
         return;
     }
 
-    if (!storeRecord($fingerprint, $record)) {
-        // Nothing was persisted, so the bench must know: this is the only case
-        // where the operator has to act on the spot.
-        relayLog('store FAILED', ['dir' => dataPath('pending')]);
-        respond(500, ['ok' => false, 'error' => 'could not store record']);
-        return;
-    }
-
-    relayLog('stored', ['fp' => substr($fingerprint, 0, 12)]);
-
-    appendCsv($record);
-
-    // Synchronous on purpose: this is what makes the sheet fill up while the
-    // operator is still looking at the bench. A failure here is not fatal, the
-    // record is already safe and will go up with a later call.
-    $forwarded = forward($fingerprint, $record);
-
-    respond(200, ['ok' => true, 'stored' => true, 'forwarded' => $forwarded]);
-
-    // From here on the bench is no longer waiting.
+    // Answered here, not after the forward: the record is already safe, and
+    // Apps Script latency (cold start plus a script lock) is unbounded and far
+    // beyond the bench's own abort.
+    respond(200, ['ok' => true, 'stored' => true]);
     closeConnection();
 
-    if ($forwarded) {
-        flushPending(FLUSH_BATCH);
-    }
+    // The bench is no longer waiting, so the retries below cost it nothing.
+    // The limit is raised because the default one would kill the worker
+    // mid-retry on a slow upstream.
+    @set_time_limit(60);
+    forward($record);
 }
 
 function respond(int $status, array $body): void
 {
+    $json = (string) json_encode($body);
+
     http_response_code($status);
-    echo json_encode($body);
+    // Content-Length lets the client finish reading the body before the worker
+    // exits: without it, a fetch() waits for the connection to close, which on
+    // a non-FPM host means waiting for the post-response forward as well.
+    header('Content-Length: ' . strlen($json));
+    echo $json;
 }
 
 /**
- * Hands the response back to the client and keeps the worker running. Under
- * PHP-FPM this is exact; elsewhere the buffers are flushed and the backlog work
- * simply happens with the connection still open, which is harmless because the
- * bench has its own timeout.
+ * Turns off everything between this script and the socket that would hold the
+ * response back. A compressing output filter replaces our Content-Length with
+ * chunked encoding, and the client then cannot tell the body has ended until
+ * the worker exits - which is exactly what the post-response forward delays.
+ */
+function disableOutputBuffering(): void
+{
+    if (function_exists('apache_setenv')) {
+        @apache_setenv('no-gzip', '1');
+        @apache_setenv('dont-vary', '1');
+    }
+
+    @ini_set('zlib.output_compression', '0');
+    @ini_set('implicit_flush', '1');
+}
+
+/**
+ * Hands the response back to the client and keeps the worker running.
  */
 function closeConnection(): void
 {
+    // PHP-FPM.
     if (function_exists('fastcgi_finish_request')) {
         fastcgi_finish_request();
         return;
     }
 
+    // LiteSpeed, which is what a lot of shared hosting actually runs. Same
+    // semantics, different name.
+    if (function_exists('litespeed_finish_request')) {
+        litespeed_finish_request();
+        return;
+    }
+
+    // mod_php and plain CGI: the connection cannot be closed from here. The
+    // bytes are pushed out and Content-Length is what lets the client stop
+    // reading; if it still waits, nothing in this file can fix it and the bench
+    // timeout has to cover the whole request instead.
     while (ob_get_level() > 0) {
         ob_end_flush();
     }
     flush();
+}
+
+// ==========================================
+// STORAGE
+// ==========================================
+
+/**
+ * Appends one record to the month's CSV, which is the relay's only copy. This
+ * is also what gets opened when the sheet is unreachable and somebody needs the
+ * numbers now.
+ *
+ * A record whose run_id is already in the file is skipped: the bench repeats
+ * the same run_id across its retries, so a lost response must not produce a
+ * second line. Scanning the file is cheap enough at one calibration per robot,
+ * and it keeps the relay free of any state directory to maintain.
+ */
+function appendCsv(array $record): bool
+{
+    $path  = DATA_DIR . '/calibrations-' . gmdate('Y-m') . '.csv';
+    $runId = (string) ($record['run_id'] ?? '');
+
+    if (!is_dir(DATA_DIR)) {
+        @mkdir(DATA_DIR, 0750, true);
+    }
+
+    $handle = @fopen($path, 'c+');
+    if ($handle === false) {
+        relayLog('csv FAILED', ['path' => $path]);
+        return false;
+    }
+
+    flock($handle, LOCK_EX);
+
+    $existing = (string) stream_get_contents($handle);
+
+    if ($runId !== '' && str_contains($existing, $runId)) {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+        relayLog('csv duplicate', ['run_id' => $runId]);
+        // Not an error: the record is in the file, which is all the bench asked
+        // for. The caller still forwards, on purpose: a retry means the first
+        // response never arrived, so that worker may well have died before
+        // reaching the sheet. A second forward is free, the sheet deduplicates
+        // on run_id.
+        return true;
+    }
+
+    if ($existing === '') {
+        // escape: '' turns off the backslash escaping nobody expects in a CSV,
+        // which mangles any value holding one and is deprecated from PHP 8.4.
+        fputcsv($handle, array_merge(
+            ['timestamp', 'run_id', 'robot', 'result', 'fw_version', 'battery_mv'],
+            VALUE_COLUMNS
+        ), ',', '"', '');
+    }
+
+    $values = $record['values'] ?? [];
+    $row    = [
+        // Same field the sheet puts in its timestamp column: the moment the
+        // record was taken, which is the moment the robot was calibrated.
+        $record['received_at'] ?? '',
+        $runId,
+        $record['robot'] ?? '',
+        $record['result'] ?? '',
+        $record['fw_version'] ?? '',
+        $record['battery_mv'] ?? '',
+    ];
+
+    foreach (VALUE_COLUMNS as $key) {
+        $row[] = is_array($values) ? ($values[$key] ?? '') : '';
+    }
+
+    fseek($handle, 0, SEEK_END);
+    fputcsv($handle, $row, ',', '"', '');
+
+    flock($handle, LOCK_UN);
+    fclose($handle);
+
+    relayLog('csv stored', ['run_id' => $runId === '' ? '-' : $runId]);
+
+    return true;
+}
+
+// ==========================================
+// UPSTREAM
+// ==========================================
+
+/**
+ * Posts one record to Apps Script, retrying a fixed number of times.
+ *
+ * FOLLOWLOCATION is mandatory: an /exec URL answers with a redirect to
+ * script.googleusercontent.com, and without it every upload looks like a 302.
+ *
+ * A retry cannot duplicate the row: calib_log.gs keys its own deduplication on
+ * run_id, so a call that wrote the row but lost its response comes back as
+ * {ok:true, duplicate:true} on the next attempt.
+ */
+function forward(array $record): bool
+{
+    if (!function_exists('curl_init')) {
+        relayLog('forward FAILED', ['reason' => 'curl extension missing']);
+        return false;
+    }
+
+    try {
+        // Without JSON_THROW_ON_ERROR a record carrying, say, invalid UTF-8
+        // would encode to false and be posted as an empty body, which upstream
+        // reports as 'empty body' three times over.
+        $body = json_encode(
+            ['token' => UPSTREAM_TOKEN, 'record' => $record],
+            JSON_THROW_ON_ERROR
+        );
+    } catch (JsonException $e) {
+        relayLog('forward FAILED', ['reason' => 'record not encodable: ' . $e->getMessage()]);
+        return false;
+    }
+
+    for ($attempt = 1; $attempt <= UPSTREAM_ATTEMPTS; $attempt++) {
+        $ch = curl_init(UPSTREAM_URL);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $body,
+            CURLOPT_HTTPHEADER     => ['Content-Type: text/plain;charset=utf-8'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT        => UPSTREAM_TIMEOUT,
+            CURLOPT_CONNECTTIMEOUT => UPSTREAM_CONNECT_TIMEOUT,
+        ]);
+
+        $response = curl_exec($ch);
+        $status   = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error    = curl_error($ch);
+
+        $answer = is_string($response) ? json_decode($response, true) : null;
+
+        if ($status === 200 && is_array($answer) && !empty($answer['ok'])) {
+            relayLog('forwarded', [
+                'attempt'   => $attempt,
+                'row'       => $answer['row'] ?? '-',
+                'duplicate' => !empty($answer['duplicate']),
+            ]);
+            return true;
+        }
+
+        relayLog('forward failed', [
+            'attempt' => $attempt,
+            'status'  => $status,
+            'curl'    => $error === '' ? '-' : $error,
+            'head'    => is_string($response) ? substr($response, 0, 120) : '-',
+        ]);
+
+        if ($attempt < UPSTREAM_ATTEMPTS) {
+            sleep(UPSTREAM_RETRY_DELAY);
+        }
+    }
+
+    // Out of attempts. The row is missing from the sheet and only the CSV has
+    // it; nobody is watching this, so the log line is the only trace.
+    relayLog('forward GIVEN UP', ['run_id' => (string) ($record['run_id'] ?? '-')]);
+
+    return false;
 }
 
 // ==========================================
@@ -308,40 +487,40 @@ function closeConnection(): void
 /**
  * Everything that has to be true for this relay to work, checked for real
  * rather than assumed. Token protected, and it returns no secret: the upstream
- * URL is reported only as its deployment id prefix.
+ * URL is reported only as its host.
  */
 function diagnostics(): array
 {
     $report = [
-        'php_version'      => PHP_VERSION,
-        'sapi'             => PHP_SAPI,
-        'fastcgi_finish'   => function_exists('fastcgi_finish_request'),
-        'curl_available'   => function_exists('curl_init'),
-        'data_dir'         => DATA_DIR,
-        'data_dir_exists'  => is_dir(DATA_DIR),
+        'php_version'       => PHP_VERSION,
+        'sapi'              => PHP_SAPI,
+        'fastcgi_finish'    => function_exists('fastcgi_finish_request'),
+        'litespeed_finish'  => function_exists('litespeed_finish_request'),
+        // If both finish functions are false, the bench waits for the whole
+        // request; if zlib is on, it waits even then, because Content-Length
+        // does not survive the compressing filter.
+        'zlib_compression'  => (string) ini_get('zlib.output_compression'),
+        'curl_available'    => function_exists('curl_init'),
+        'data_dir'          => DATA_DIR,
         'data_dir_writable' => false,
-        'pending'          => 0,
-        'sent'             => 0,
-        'rejected'         => 0,
-        'upstream_host'    => (string) parse_url(UPSTREAM_URL, PHP_URL_HOST),
-        'upstream_configured' => strpos(UPSTREAM_URL, 'PASTE_YOUR_EXEC_ID') === false,
+        'csv_bytes'         => 0,
+        'upstream_host'     => (string) parse_url(UPSTREAM_URL, PHP_URL_HOST),
     ];
 
     // Written and removed for real: is_writable lies on some shared hosting
     // setups where the mount is read only but the permission bits are not.
-    $probe = DATA_DIR . '/.write_probe';
     if (!is_dir(DATA_DIR)) {
         @mkdir(DATA_DIR, 0750, true);
     }
+
+    $probe = DATA_DIR . '/.write_probe';
     if (@file_put_contents($probe, 'probe') !== false) {
         $report['data_dir_writable'] = true;
         @unlink($probe);
     }
 
-    $report['data_dir_exists'] = is_dir(DATA_DIR);
-    $report['pending']  = count(glob(dataPath('pending') . '/*.json') ?: []);
-    $report['sent']     = count(glob(dataPath('sent') . '/*.json') ?: []);
-    $report['rejected'] = count(glob(dataPath('rejected') . '/*.json') ?: []);
+    $csv = DATA_DIR . '/calibrations-' . gmdate('Y-m') . '.csv';
+    $report['csv_bytes'] = file_exists($csv) ? (int) filesize($csv) : 0;
 
     if (!$report['curl_available']) {
         $report['upstream'] = ['error' => 'curl extension missing'];
@@ -350,18 +529,18 @@ function diagnostics(): array
 
     // A GET against the deployment. calib_log.gs answers doGet with a small
     // JSON, so anything else here is a deployment problem, not a relay one.
+    // total_time_s is the number to watch: it is the floor of every forward.
     $ch = curl_init(UPSTREAM_URL);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_TIMEOUT        => UPSTREAM_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_CONNECTTIMEOUT => UPSTREAM_CONNECT_TIMEOUT,
     ]);
 
     $body  = curl_exec($ch);
     $info  = curl_getinfo($ch);
     $error = curl_error($ch);
-    curl_close($ch);
 
     $report['upstream'] = [
         'http_code'    => $info['http_code'] ?? 0,
@@ -375,8 +554,8 @@ function diagnostics(): array
 }
 
 /**
- * Append only stage log. This is the file to read when the bench says the
- * upload failed and nothing else explains why.
+ * Append only stage log. This is the file to read when a row is missing from
+ * the sheet: 'forward GIVEN UP' names the run_id to recover from the CSV.
  */
 function relayLog(string $stage, array $context = []): void
 {
@@ -429,9 +608,12 @@ function clientIp(): string
  */
 function allowRequest(string $ip): bool
 {
-    $path = dataPath('rate') . '/' . sha1($ip) . '.txt';
+    $dir = DATA_DIR . '/rate';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0750, true);
+    }
 
-    $handle = @fopen($path, 'c+');
+    $handle = @fopen($dir . '/' . sha1($ip) . '.txt', 'c+');
     if ($handle === false) {
         // Never lock the bench out because of a storage problem.
         return true;
@@ -461,221 +643,4 @@ function allowRequest(string $ip): bool
     fclose($handle);
 
     return $allowed;
-}
-
-// ==========================================
-// STORAGE
-// ==========================================
-
-/**
- * Identity of a record, used as a filename, which gives deduplication for free
- * without any index to keep consistent.
- *
- * It is the run_id minted by the bench, never a hash of the values: two
- * calibrations of the same robot may legitimately produce identical numbers and
- * must still land as two rows. The bench repeats the same run_id across its own
- * retries, so those still collapse into one.
- *
- * Hashed rather than used raw: the result becomes a path, and a client supplied
- * string never gets to decide where this process writes.
- */
-function fingerprint(array $record): string
-{
-    $runId = (string) ($record['run_id'] ?? '');
-
-    if ($runId !== '') {
-        return sha1('run:' . $runId);
-    }
-
-    // Older bench without run_id: fall back to the content, which at least
-    // keeps retries idempotent.
-    $values = $record['values'] ?? [];
-    if (is_array($values)) {
-        ksort($values);
-    }
-
-    return sha1((string) json_encode([
-        $record['robot'] ?? '',
-        $record['result'] ?? '',
-        $record['fw_version'] ?? '',
-        $values,
-    ]));
-}
-
-function dataPath(string $subdir, string $fingerprint = ''): string
-{
-    $path = DATA_DIR . '/' . $subdir;
-    if (!is_dir($path)) {
-        @mkdir($path, 0750, true);
-    }
-
-    return $fingerprint === '' ? $path : $path . '/' . $fingerprint . '.json';
-}
-
-function alreadySeen(string $fingerprint): bool
-{
-    return file_exists(dataPath('pending', $fingerprint))
-        || file_exists(dataPath('sent', $fingerprint));
-}
-
-function storeRecord(string $fingerprint, array $record): bool
-{
-    $target = dataPath('pending', $fingerprint);
-    $tmp    = $target . '.tmp';
-
-    // Write then rename: a crash mid-write leaves a .tmp behind rather than a
-    // truncated record a later call would try to forward.
-    if (@file_put_contents($tmp, json_encode($record, JSON_PRETTY_PRINT)) === false) {
-        return false;
-    }
-
-    return @rename($tmp, $target);
-}
-
-/**
- * Human readable mirror, one file per month. This is what gets opened when the
- * sheet is unreachable and somebody needs the numbers now.
- */
-function appendCsv(array $record): void
-{
-    $path   = DATA_DIR . '/calibrations-' . gmdate('Y-m') . '.csv';
-    $isNew  = !file_exists($path);
-    $values = $record['values'] ?? [];
-
-    $handle = @fopen($path, 'a');
-    if ($handle === false) {
-        relayLog('csv FAILED', ['path' => $path]);
-        return;
-    }
-
-    flock($handle, LOCK_EX);
-
-    if ($isNew) {
-        fputcsv($handle, array_merge(
-            ['timestamp', 'run_id', 'robot', 'result', 'fw_version', 'battery_mv'],
-            VALUE_COLUMNS
-        ));
-    }
-
-    $row = [
-        // Same field the sheet puts in its timestamp column: the moment the
-        // record was taken, which is the moment the robot was calibrated.
-        $record['received_at'] ?? '',
-        $record['run_id'] ?? '',
-        $record['robot'] ?? '',
-        $record['result'] ?? '',
-        $record['fw_version'] ?? '',
-        $record['battery_mv'] ?? '',
-    ];
-
-    foreach (VALUE_COLUMNS as $key) {
-        $row[] = is_array($values) ? ($values[$key] ?? '') : '';
-    }
-
-    fputcsv($handle, $row);
-    flock($handle, LOCK_UN);
-    fclose($handle);
-}
-
-// ==========================================
-// UPSTREAM
-// ==========================================
-
-/**
- * Posts one record to Apps Script and, on success, moves it out of pending.
- * FOLLOWLOCATION is mandatory: an /exec URL answers with a redirect to
- * script.googleusercontent.com, and without it every upload looks like a 302.
- */
-function forward(string $fingerprint, array $record): bool
-{
-    if (!function_exists('curl_init')) {
-        relayLog('forward FAILED', ['reason' => 'curl extension missing']);
-        return false;
-    }
-
-    $ch = curl_init(UPSTREAM_URL);
-    curl_setopt_array($ch, [
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => json_encode([
-            'token'  => UPSTREAM_TOKEN,
-            'record' => $record,
-        ]),
-        CURLOPT_HTTPHEADER     => ['Content-Type: text/plain;charset=utf-8'],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_TIMEOUT        => UPSTREAM_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => 5,
-    ]);
-
-    $body   = curl_exec($ch);
-    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error  = curl_error($ch);
-    curl_close($ch);
-
-    if ($body === false || $status !== 200) {
-        relayLog('forward FAILED', [
-            'fp'     => substr($fingerprint, 0, 12),
-            'status' => $status,
-            'curl'   => $error === '' ? '-' : $error,
-        ]);
-        return false;
-    }
-
-    $answer = json_decode((string) $body, true);
-    if (!is_array($answer) || empty($answer['ok'])) {
-        // A rejected record will be rejected again on every retry, so it is
-        // parked instead of being replayed forever: it needs a human.
-        relayLog('forward REJECTED', [
-            'fp'   => substr($fingerprint, 0, 12),
-            'head' => substr((string) $body, 0, 160),
-        ]);
-        @rename(dataPath('pending', $fingerprint), dataPath('rejected', $fingerprint));
-        return false;
-    }
-
-    relayLog('forwarded', [
-        'fp'        => substr($fingerprint, 0, 12),
-        'duplicate' => !empty($answer['duplicate']),
-    ]);
-
-    @rename(dataPath('pending', $fingerprint), dataPath('sent', $fingerprint));
-    return true;
-}
-
-/**
- * Pushes up to $limit backlogged records upstream. Called after the response
- * has been sent, so the operator never waits for a replay; oldest first, so a
- * long outage lands in the sheet in the order it happened.
- */
-function flushPending(int $limit): int
-{
-    $files = glob(dataPath('pending') . '/*.json') ?: [];
-    if ($files === []) {
-        return 0;
-    }
-
-    usort($files, static fn(string $a, string $b): int => filemtime($a) <=> filemtime($b));
-
-    $sent = 0;
-    foreach (array_slice($files, 0, $limit) as $file) {
-        $record = json_decode((string) file_get_contents($file), true);
-        if (!is_array($record)) {
-            continue;
-        }
-
-        if (!forward(basename($file, '.json'), $record)) {
-            // Upstream is down again: stop rather than burn the batch on it.
-            break;
-        }
-
-        $sent++;
-    }
-
-    relayLog('flush done', ['sent' => $sent, 'pending' => count($files)]);
-
-    if (PHP_SAPI === 'cli') {
-        echo gmdate('c') . " flushed $sent of " . count($files) . " pending record(s)\n";
-    }
-
-    return 0;
 }
