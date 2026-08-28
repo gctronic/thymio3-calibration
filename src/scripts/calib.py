@@ -16,7 +16,7 @@ MODE = "__CALIB_MODE__"
 if MODE.startswith("__"):
     MODE = "full"
 
-SCRIPT_VERSION = "22.08.26v21"
+SCRIPT_VERSION = "28.08.26v1"
 
 CALIB_LR_FACTOR = 150
 CALIB_FWBW_MOT_SPEED = 300
@@ -40,6 +40,7 @@ GYRO_OFFSET_POLL_SEC = 0.1
 # Firmware factory defaults (settings.h) used when wiping previous calib.
 DEFAULT_GROUND_BLACK = 35
 DEFAULT_GROUND_WHITE = 300
+MAX_BRIGHTNESS = 16
 
 mot = thymio.MOTORS()
 imu = thymio.IMU()
@@ -52,6 +53,7 @@ rgb_fl = thymio.LEDS_RGB(0)
 rgb_fr = thymio.LEDS_RGB(1)
 rgb_bl = thymio.LEDS_RGB(2)
 rgb_br = thymio.LEDS_RGB(3)
+col_led = thymio.LED_COLOR()     # bottom white LED
 
 ground_white = [0, 0]
 ground_black = [1023, 1023]
@@ -208,10 +210,11 @@ print("script version = " + SCRIPT_VERSION)
 while 1:
 
     if calib_state == 0:
+        col_led.intensity(MAX_BRIGHTNESS) # this is needed because maybe a previous test turn off it
         reset_previous_calibrations()
-        if wait_gyro_offsets() == 0:
-            fail(0, "Timed out waiting for gyro offsets (keep the robot still)")
-            continue
+        #if wait_gyro_offsets() == 0:
+        #    fail(0, "Timed out waiting for gyro offsets (keep the robot still)")
+        #    continue
 
         if MODE == "distance":
             mot.set_speed(200, 200)
@@ -229,6 +232,15 @@ while 1:
         mot.set_speed(-200, -200)
         time.sleep(0.2)
         mot.set_speed(0, 0)
+        time.sleep(1.0)
+        # Now the robot is still, calibrate the IMU offsets
+        imu.disable_gyro_auto_calib()
+        imu.calibrate_gyro()
+        offs = imu.get_gyro_calib()
+        if(offs[0] == 0) and (offs[1] == 0) and (offs[2] == 0):
+            fail(0, "Gyro offsets are zero!")
+            continue
+        #print("imu offsets = " + str(offs) + " (frozen for this run)")
         time.sleep(0.4)
         gyro_reset()
 

@@ -62,6 +62,9 @@ const LOG_PLACEHOLDER = 'Waiting for data...';
  *              exercise the ends of the range one after the other and the
  *              channel turns green only once all of them have been seen.
  *   untracked  channel indexes excluded from the checks
+ *   minStart   seed for the logged minimum, instead of the first reading. Set
+ *              on the sensors that idle at the bottom of their scale, so the
+ *              minimum starts high and is only lowered by a real reading.
  *
  * A channel with no checks is only formatted, never coloured.
  */
@@ -72,12 +75,14 @@ const LIVE_SENSORS = {
     width: 4,
     // Proven when the sensor both goes fully dark and saturates.
     checks: [(v) => v <= 0, (v) => v > 3500],
+    minStart: 1000,
   },
   ground: {
     elementId: 'lbl-ground',
     count: 2,
     width: 4,
     checks: [(v) => v <= 10, (v) => v >= 300],
+    minStart: 1000,
   },
   color: {
     elementId: 'lbl-color',
@@ -85,6 +90,7 @@ const LIVE_SENSORS = {
     width: 5,
     checks: [(v) => v < 50, (v) => v > 180],
     untracked: [3], // clear channel: not part of the acceptance criteria
+    minStart: 1000,
   },
   accel: {
     elementId: 'lbl-accel',
@@ -108,6 +114,12 @@ const LIVE_SENSORS = {
 // key -> per channel array of latched check results.
 const liveSensorLatches = {};
 
+// key -> per channel { min, max } of every finite value seen since the robot
+// was connected. Unlike the latches, these survive a script start: a test record
+// is meant to carry everything the operator has exercised on this robot, not
+// only what happened after the last button press. Cleared on disconnection.
+const liveSensorRanges = {};
+
 function latchesFor(key, count) {
   const spec = LIVE_SENSORS[key];
   const checkCount = spec.checks ? spec.checks.length : 0;
@@ -119,6 +131,19 @@ function latchesFor(key, count) {
   }
 
   return latch;
+}
+
+function rangesFor(key, count) {
+  const spec = LIVE_SENSORS[key];
+  const minStart = spec.minStart === undefined ? null : spec.minStart;
+  let bounds = liveSensorRanges[key];
+
+  if (!bounds || bounds.length !== count) {
+    bounds = Array.from({ length: count }, () => ({ min: minStart, max: null }));
+    liveSensorRanges[key] = bounds;
+  }
+
+  return bounds;
 }
 
 /**
@@ -156,6 +181,7 @@ function renderLiveSensor(key, values) {
 
   const count = spec.count || values.length;
   const latch = latchesFor(key, count);
+  const bounds = rangesFor(key, count);
   const untracked = spec.untracked || [];
   const spans = channelSpans(el, count);
 
@@ -170,6 +196,13 @@ function renderLiveSensor(key, values) {
       spec.checks.forEach((check, c) => {
         if (check(number)) latch[i][c] = true;
       });
+    }
+
+    // Extremes are kept for every channel, including the untracked ones: they
+    // are a readout of what the sensor did, not an acceptance criterion.
+    if (Number.isFinite(number)) {
+      if (bounds[i].min === null || number < bounds[i].min) bounds[i].min = number;
+      if (bounds[i].max === null || number > bounds[i].max) bounds[i].max = number;
     }
 
     const passed = tracked && latch[i].every(Boolean);
@@ -206,6 +239,48 @@ function resetLiveSensorPasses() {
       span.classList.remove('pass');
     }
   }
+}
+
+/**
+ * Called on disconnection only. The extremes describe one robot's whole stay on
+ * the bench, across as many test runs as the operator needs, so they must not be
+ * cleared by a script start the way the green marks are.
+ */
+function resetLiveSensorRanges() {
+  for (const key of Object.keys(liveSensorRanges)) {
+    delete liveSensorRanges[key];
+  }
+}
+
+/**
+ * The extremes as they stand right now, one printed list per sensor group and
+ * per bound, in the same shape the sheet already uses for coupled calibration
+ * values. A channel that never produced a finite reading prints '-' on both
+ * bounds: the seeded minimum of a silent channel would otherwise read as a
+ * measurement.
+ */
+function liveSensorRangeValues() {
+  const values = {};
+
+  for (const [key, spec] of Object.entries(LIVE_SENSORS)) {
+    const bounds = liveSensorRanges[key];
+    const mins = [];
+    const maxs = [];
+
+    for (let i = 0; i < spec.count; i += 1) {
+      const channel = bounds ? bounds[i] : null;
+      // max is seeded to null on every group, so it is what tells a channel
+      // that has been read from one that never answered.
+      const seen = Boolean(channel) && channel.max !== null;
+      mins.push(seen && channel.min !== null ? formatChannel(channel.min) : '-');
+      maxs.push(seen ? formatChannel(channel.max) : '-');
+    }
+
+    values[`${key} min`] = `[${mins.join(', ')}]`;
+    values[`${key} max`] = `[${maxs.join(', ')}]`;
+  }
+
+  return values;
 }
 
 // ==========================================
@@ -372,6 +447,8 @@ document.addEventListener('thymio-disconnected', () => {
   // has left: it gets the attempt in flight and no retries.
   connectionGeneration++;
   resetLiveSensorPasses();
+  // The extremes belong to the robot that has just left the bench.
+  resetLiveSensorRanges();
   renderNotices();
   abortCalibrationSession('Disconnected');
   console.warn('Thymio link lost.');
@@ -1001,7 +1078,46 @@ function finalizeCalibrationSession() {
 
   discardCalibrationSession();
   restoreStreamingAfterReadback();
-  sendCalibration(record, generation);
+  sendRecord(record, generation, 'Calibration');
+}
+
+// ==========================================
+// TEST LOGGING (Google Sheets)
+// ==========================================
+
+// Same relay, same token, same retry budget as a calibration record. The only
+// difference is record.kind, which is what routes it to the 'thymio3_tests' tab.
+const TEST_LABELS = {
+  full: 'Full test',
+  main: 'PCB main test',
+  low: 'PCB low test',
+  touch: 'Touch test',
+};
+
+/**
+ * Logs one test run. Taken at the button press, so the extremes are the ones the
+ * operator has just been looking at: everything the sensors have done since this
+ * robot was connected, including the previous test runs of the same robot.
+ *
+ * Fire and forget on purpose: the upload must never delay the script upload the
+ * operator actually pressed the button for.
+ */
+function logTestRun(mode) {
+  if (!thymio.isConnected()) return;
+
+  const record = {
+    // Read by calib_log.php and calib_log.gs: a record without it is a
+    // calibration and goes to the calibration tab.
+    kind: 'test',
+    // Identity of this run, repeated unchanged by every retry, so a lost
+    // response cannot produce a second row.
+    run_id: crypto.randomUUID(),
+    robot: thymio.getDeviceName(),
+    test: TEST_LABELS[mode] || mode,
+    values: liveSensorRangeValues(),
+  };
+
+  sendRecord(record, connectionGeneration, 'Test');
 }
 
 // ==========================================
@@ -1120,7 +1236,7 @@ function restoreStreamingAfterReadback() {
  * it: the relay forwards to Google after answering, precisely so the operator
  * never waits on a latency nobody controls.
  */
-async function postCalibration(record) {
+async function postRecord(record) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CALIB_LOG.timeoutMs);
 
@@ -1156,19 +1272,19 @@ async function postCalibration(record) {
  * Retries are safe: the record carries the same run_id every time, and both the
  * relay CSV and the sheet key their deduplication on it.
  */
-async function sendCalibration(record, generation) {
-  setLogStatus('Saving...');
+async function sendRecord(record, generation, what) {
+  setLogStatus(`Saving ${what.toLowerCase()}...`);
 
   for (let attempt = 1; attempt <= CALIB_LOG.maxAttempts; attempt++) {
     try {
-      await postCalibration(record);
-      setLogStatus('Saved', 'ok');
+      await postRecord(record);
+      setLogStatus(`${what} saved`, 'ok');
       return;
     } catch (err) {
-      console.error(`Calibration upload attempt ${attempt} failed`, err);
+      console.error(`${what} upload attempt ${attempt} failed`, err);
 
       if (generation !== connectionGeneration) {
-        setLogStatus('NOT saved (robot disconnected)', 'error');
+        setLogStatus(`${what} NOT saved (robot disconnected)`, 'error');
         return;
       }
 
@@ -1179,9 +1295,9 @@ async function sendCalibration(record, generation) {
   }
 
   // All attempts spent without the relay ever answering. The record is lost:
-  // the operator sees it and can recalibrate, which is cheaper than keeping a
+  // the operator sees it and can run it again, which is cheaper than keeping a
   // queue nobody watches.
-  setLogStatus('NOT saved', 'ok');
+  setLogStatus(`${what} NOT saved`, 'ok');
 }
 
 async function runScript(type, mode = null) {
@@ -1243,12 +1359,21 @@ async function runScript(type, mode = null) {
   }
 }
 
+/**
+ * A test button logs the run and then starts the script. The record is taken
+ * first, before anything on the bench changes.
+ */
+function runTest(mode) {
+  logTestRun(mode);
+  runScript('test', mode);
+}
+
 els.btnConnect.addEventListener('click', connectAndStream);
 els.btnDisconnect.addEventListener('click', handleDisconnect);
-els.btnTestFull.addEventListener('click', () => runScript('test', 'full'));
-els.btnTestMain.addEventListener('click', () => runScript('test', 'main'));
-els.btnTestLow.addEventListener('click', () => runScript('test', 'low'));
-els.btnTestTouch.addEventListener('click', () => runScript('test', 'touch'));
+els.btnTestFull.addEventListener('click', () => runTest('full'));
+els.btnTestMain.addEventListener('click', () => runTest('main'));
+els.btnTestLow.addEventListener('click', () => runTest('low'));
+els.btnTestTouch.addEventListener('click', () => runTest('touch'));
 els.btnCalib.addEventListener('click', () => runScript('calib'));
 els.btnStop.addEventListener('click', async () => {
   try {

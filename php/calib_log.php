@@ -14,8 +14,13 @@
  *
  * Companion of main.js (CALIB_LOG) and calib_log.gs (API_TOKEN).
  *
+ * Two kinds of record go through here, told apart by record.kind: a calibration
+ * (no kind) and a test run (kind = 'test'), which carries the live sensor
+ * extremes. Each gets its own CSV here and its own tab in the sheet; everything
+ * else - token, rate limit, retries, deduplication - is shared.
+ *
  * Endpoints, all POST with Content-Type: text/plain
- *   {"token":"...","record":{...}}  store and forward one calibration
+ *   {"token":"...","record":{...}}  store and forward one record
  *   {"token":"...","diag":true}     environment report, for debugging
  * A plain GET answers with a liveness probe and no token, so that opening the
  * URL in a browser tells you whether the file is served at all.
@@ -99,6 +104,17 @@ const VALUE_COLUMNS = [
     'imu scaling', 'imu offsets',
     'color calib',
     'ground black', 'ground white',
+];
+
+// Same idea for a test record (record.kind === 'test'), which carries the live
+// sensor extremes instead of calibration outputs and goes to its own CSV.
+const TEST_VALUE_COLUMNS = [
+    'prox min', 'prox max',
+    'ground min', 'ground max',
+    'color min', 'color max',
+    'accel min', 'accel max',
+    'gyro min', 'gyro max',
+    'angle min', 'angle max',
 ];
 
 // ==========================================
@@ -238,6 +254,7 @@ function handleRequest(): void
     $runId = (string) ($record['run_id'] ?? '');
 
     relayLog('record in', [
+        'kind'   => (string) ($record['kind'] ?? 'calibration'),
         'robot'  => (string) $record['robot'],
         'run_id' => $runId === '' ? '-' : $runId,
     ]);
@@ -335,7 +352,17 @@ function closeConnection(): void
  */
 function appendCsv(array $record): bool
 {
-    $path  = DATA_DIR . '/calibrations-' . gmdate('Y-m') . '.csv';
+    $isTest = ($record['kind'] ?? '') === 'test';
+
+    // Two layouts, two files, one code path: a test record has nothing in common
+    // with a calibration one except robot and run_id, and mixing them in a single
+    // CSV would leave half the columns empty on every line.
+    $head = $isTest
+        ? ['run_id', 'robot', 'test']
+        : ['run_id', 'robot', 'result', 'fw_version', 'battery_mv'];
+    $valueColumns = $isTest ? TEST_VALUE_COLUMNS : VALUE_COLUMNS;
+
+    $path  = DATA_DIR . '/' . ($isTest ? 'tests-' : 'calibrations-') . gmdate('Y-m') . '.csv';
     $runId = (string) ($record['run_id'] ?? '');
 
     if (!is_dir(DATA_DIR)) {
@@ -367,25 +394,20 @@ function appendCsv(array $record): bool
     if ($existing === '') {
         // escape: '' turns off the backslash escaping nobody expects in a CSV,
         // which mangles any value holding one and is deprecated from PHP 8.4.
-        fputcsv($handle, array_merge(
-            ['timestamp', 'run_id', 'robot', 'result', 'fw_version', 'battery_mv'],
-            VALUE_COLUMNS
-        ), ',', '"', '');
+        fputcsv($handle, array_merge(['timestamp'], $head, $valueColumns), ',', '"', '');
     }
 
     $values = $record['values'] ?? [];
-    $row    = [
-        // Same field the sheet puts in its timestamp column: the moment the
-        // record was taken, which is the moment the robot was calibrated.
-        $record['received_at'] ?? '',
-        $runId,
-        $record['robot'] ?? '',
-        $record['result'] ?? '',
-        $record['fw_version'] ?? '',
-        $record['battery_mv'] ?? '',
-    ];
 
-    foreach (VALUE_COLUMNS as $key) {
+    // Same field the sheet puts in its timestamp column: the moment the record
+    // was taken, which is the moment the robot was calibrated or tested.
+    $row = [$record['received_at'] ?? ''];
+
+    foreach ($head as $key) {
+        $row[] = $record[$key] ?? '';
+    }
+
+    foreach ($valueColumns as $key) {
         $row[] = is_array($values) ? ($values[$key] ?? '') : '';
     }
 
