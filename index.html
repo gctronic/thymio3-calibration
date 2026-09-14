@@ -19,7 +19,7 @@
     <header class="header">
       <div class="header-title">
         <h1>Thymio 3 Test and Calibration</h1>
-        <span class="version">28.08.26v1</span>
+        <span class="version">14.09.26v1</span>
       </div>
 
       <div class="header-connection">
@@ -43,6 +43,9 @@
       <div class="action-group">
         <span class="action-label">Calibration</span>
         <button id="btn-calib">Start Calibration</button>
+        <!-- Same calibration run, but reset_previous_calibrations() keeps the
+             L/R straight calibration already stored in the robot. -->
+        <button id="btn-calib-no-lr" hidden>Start Calibration (no LR reset)</button>
       </div>
 
       <div class="action-group action-group-end">
@@ -62,6 +65,10 @@
           <div class="sensor-row"><span>Gyro rate raw (X, Y, Z)</span> <strong id="lbl-gyro-rate">-</strong></div>
           <div class="sensor-row"><span>IMU angle (deg)</span> <strong id="lbl-angle-deg">-</strong></div>
           <div class="sensor-row"><span>Color raw (R, G, B, Clear)</span> <strong id="lbl-color">-</strong></div>
+          <!-- Filled by the touch test, one column per button, min/max of the
+               raw value: the channel drops on a press and climbs back on release,
+               so it reads pressed/released. A column stays '-' until pressed. -->
+          <div class="sensor-row"><span>Buttons raw (L, R, F, B, C)</span> <strong id="lbl-buttons">-</strong></div>
         </div>
       </section>
 

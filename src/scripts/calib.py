@@ -16,7 +16,16 @@ MODE = "__CALIB_MODE__"
 if MODE.startswith("__"):
     MODE = "full"
 
-SCRIPT_VERSION = "28.08.26v1"
+# Also replaced by the web app before upload ("no LR reset" button):
+#   "0"  normal run, the L/R straight calibration is wiped like everything else
+#   "1"  reset_straight_calibration()/save_straight_calibration() are skipped in
+#        reset_previous_calibrations(), so the value already in flash survives
+#        the start of the run.
+SKIP_LR_RESET = "__SKIP_LR_RESET__"
+if SKIP_LR_RESET.startswith("__"):
+    SKIP_LR_RESET = "0"
+
+SCRIPT_VERSION = "14.09.26v1"
 
 CALIB_LR_FACTOR = 150
 CALIB_FWBW_MOT_SPEED = 300
@@ -58,8 +67,13 @@ col_led = thymio.LED_COLOR()     # bottom white LED
 ground_white = [0, 0]
 ground_black = [1023, 1023]
 
-calibLeft = 256.0
-calibRight = 256.0
+# Firmware neutral value for the straight calibration, i.e. what
+# reset_straight_calibration() leaves behind. Also the fallback when a "no LR
+# reset" run finds no usable value stored in the robot.
+CALIB_LR_DEFAULT = 256.0
+
+calibLeft = CALIB_LR_DEFAULT
+calibRight = CALIB_LR_DEFAULT
 imu_angle_diff = 0
 
 calib_mot_fw_state = 0
@@ -185,13 +199,41 @@ def wait_gyro_offsets():
     return 0
 
 
+def seed_straight_calibration():
+    # "no LR reset" run: the value already stored in the robot stays in flash
+    # AND becomes the starting point of the run, otherwise state 10 would
+    # overwrite it anyway by correcting from the neutral 256/256.
+    global calibLeft, calibRight
+    cur = mot.get_straight_calibration()
+    left = CALIB_LR_DEFAULT
+    right = CALIB_LR_DEFAULT
+    try:
+        left = float(cur[0])
+        right = float(cur[1])
+    except (TypeError, IndexError, ValueError):
+        print("straight calibration unreadable: " + str(cur))
+    # A robot that was never calibrated reports zeros: correcting from 0 would
+    # drive both wheels to nonsense, so fall back to the neutral value.
+    if left <= 0 or right <= 0:
+        print("stored straight calibration not usable: " + str(cur))
+        left = CALIB_LR_DEFAULT
+        right = CALIB_LR_DEFAULT
+    calibLeft = left
+    calibRight = right
+
+
 def reset_previous_calibrations():
     # Wipe RAM and flash so this run does not inherit L/R, distance, gyro or
     # ground from a previous robot / previous attempt. Colour has no factory
     # reset; white then black samples overwrite it during the run.
     print("resetting previous calibration")
-    mot.reset_straight_calibration()
-    mot.save_straight_calibration()
+    if SKIP_LR_RESET == "1":
+        seed_straight_calibration()
+        print("skipping L/R straight reset, starting from L/R " +
+              str(int(calibLeft)) + "/" + str(int(calibRight)))
+    else:
+        mot.reset_straight_calibration()
+        mot.save_straight_calibration()
     mot.reset_distance_calibration()
     mot.save_distance_calibration()
     imu.set_gyro_scale_calib(0)
@@ -232,7 +274,7 @@ while 1:
         mot.set_speed(-200, -200)
         time.sleep(0.2)
         mot.set_speed(0, 0)
-        time.sleep(1.0)
+        time.sleep(0.5)
         # Now the robot is still, calibrate the IMU offsets
         imu.disable_gyro_auto_calib()
         imu.calibrate_gyro()
@@ -326,6 +368,10 @@ while 1:
         if both_black():
             time.sleep(0.1)
             mot.set_speed(0, 0)
+            imu.rotate_deg(-imu.get_angle_deg(), 500)
+            while imu.rotation_completed() == 0:
+                time.sleep(0.1)
+            time.sleep(0.2)            
             #print("found black rectangle: " + str(g0.value()) + ", " + str(g1.value()))
             calib_timeout_counter = 0
             calib_state = 5
@@ -339,6 +385,10 @@ while 1:
         if both_white():
             mot.set_speed(0, 0)
             time.sleep(0.5)
+            imu.rotate_deg(-imu.get_angle_deg(), 500)
+            while imu.rotation_completed() == 0:
+                time.sleep(0.1)
+            time.sleep(0.2)            
             #print("found white after rectangle: " + str(g0.value()) + ", " + str(g1.value()))
             calib_timeout_counter = 0
             calib_state = 10
@@ -368,6 +418,10 @@ while 1:
                 mot.set_speed(0, 0)
                 time.sleep(0.8)
                 angle, _angle_deg = gyro_read()
+                imu.rotate_deg(-imu.get_angle_deg(), 500)
+                while imu.rotation_completed() == 0:
+                    time.sleep(0.1)
+                time.sleep(0.2)
                 gyro_reset()
                 #print("LR angle = " + str(angle))
                 calibLeft = calibLeft + angle / CALIB_LR_FACTOR

@@ -249,10 +249,44 @@ def monitor_main():
 def monitor_touch():
     """Step 13: press all 5 buttons, the related LEDs turn off."""
     print("manual test: press left, right, forward, backward, center")
+    buttons_names = ["backward", "left", "center", "forward", "right"]
+    buttons_raw_min = [1000] * 5
+    buttons_raw_max = [0] * 5
+    buttons_prev = [0] * 5
+    # Readouts still owed after a release. The readout is repeated because the
+    # stdout pipe only hands over what it holds once the next print arrives: a
+    # single line sent at the very moment the printing stops would sit there
+    # until the idle flush, about a second later.
+    buttons_report = [0] * 5
     while 1:
-        time.sleep(0.02)
+        time.sleep(0.1)
 
         button_state = btn.get_status()
+        button_raw = btn.get_raw()
+
+        for i in range(5):
+            pressed = button_state[i] == 1
+
+            # The channel is inverted: the raw value climbs back up on release,
+            # so the maximum is the resting baseline and can be refreshed on
+            # every cycle. A press only pushes downwards and cannot pollute it.
+            if button_raw[i] > buttons_raw_max[i]:
+                buttons_raw_max[i] = button_raw[i]
+            if pressed and button_raw[i] < buttons_raw_min[i]:
+                buttons_raw_min[i] = button_raw[i]
+
+            if pressed:
+                print(buttons_names[i], "pressed")
+                buttons_report[i] = 0
+            else:
+                if buttons_prev[i] == 1:
+                    buttons_report[i] = 5
+                if buttons_report[i] > 0:
+                    print(buttons_names[i], "min:", buttons_raw_min[i],
+                          ", max:", buttons_raw_max[i])
+                    buttons_report[i] -= 1
+
+            buttons_prev[i] = 1 if pressed else 0
 
         if button_state[3] == 1:  # forward
             leds_buttons[0].intensity(0)

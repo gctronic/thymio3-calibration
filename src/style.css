@@ -412,15 +412,23 @@ button.ghost:hover:not(:disabled) {
 
 .sensor-row strong .ch {
   display: inline-block;
-  min-width: var(--ch-width, 4ch);
+  /* box-sizing is border-box, so the padding has to be added on top of the
+     column width or a coloured channel would squeeze its own digits. */
+  min-width: calc(var(--ch-width, 4ch) + 8px);
+  padding: 0 4px;
+  border-radius: 3px;
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
 /* The channel has hit both ends of its expected range at least once since the
-   last reset: the sensor is proven and the operator can move on. */
-.sensor-row strong .ch.pass {
-  color: var(--ok);
+   last reset: the sensor is proven and the operator can move on. The verdict
+   sits on the background rather than on the digits, like .bad does in the
+   calibration panel: it has to carry from across the bench. */
+.sensor-row strong .ch.pass,
+#lbl-buttons .ch.ok {
+  background: var(--ok);
+  color: #fff;
   font-weight: 700;
 }
 
@@ -704,4 +712,25 @@ button.ghost:hover:not(:disabled) {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Touch button channels. They share the green above and add two states the
+   other rows have no use for: a measurement in progress, and a press that was
+   registered but did not move the raw value far enough.
+
+     .measuring  held down right now, values still being collected
+     .ok         released, swing wide enough
+     .fail       released, swing too small
+
+   A column with none of the three has never been pressed and stays plain. */
+#lbl-buttons .ch.measuring {
+  background: var(--warn);
+  color: #fff;
+  font-weight: 700;
+}
+
+#lbl-buttons .ch.fail {
+  background: var(--fail);
+  color: #fff;
+  font-weight: 700;
 }

@@ -30,6 +30,7 @@ const els = {
   btnConnect: document.getElementById('btn-connect'),
   btnDisconnect: document.getElementById('btn-disconnect'),
   btnCalib: document.getElementById('btn-calib'),
+  btnCalibNoLr: document.getElementById('btn-calib-no-lr'),
   btnStop: document.getElementById('btn-stop'),
   lblAngleDeg: document.getElementById('lbl-angle-deg'),
   btnTestFull: document.getElementById('btn-test-full'),
@@ -109,6 +110,21 @@ const LIVE_SENSORS = {
     count: 1,
     width: 4,
   },
+  // Touch buttons. Unlike every other group this one is not fed by the sensor
+  // stream but by the lines the touch test prints, so its channels are filled
+  // one press at a time and each column shows "min/max" instead of a live
+  // reading. See the TOUCH BUTTONS section below.
+  buttons: {
+    elementId: 'lbl-buttons',
+    count: 5,
+    width: 9,
+    // No checks: renderLiveSensor() judges one value at a time, while a button
+    // is judged on the swing between its two extremes. renderButtonsRow() takes
+    // that verdict straight from the extremes, so there is no latch to keep in
+    // step with them across a script restart.
+    // No minStart either, unlike the streamed groups: the minimum of a button is
+    // its pressed value, and a seed would sit below it and never be replaced.
+  },
 };
 
 // key -> per channel array of latched check results.
@@ -172,6 +188,18 @@ function formatChannel(value) {
   return Number.isInteger(number) ? String(number) : number.toFixed(1);
 }
 
+/**
+ * The number a channel carries, or NaN when the channel is empty. An empty
+ * channel must not fall through to Number(): Number(null) and Number('') are
+ * both 0, which is a perfectly plausible reading and would be latched as one
+ * and logged as one. initLiveSensors() lays out every row with empty channels,
+ * so without this every group starts with a minimum of 0 it never measured.
+ */
+function channelNumber(value) {
+  if (value === null || value === undefined || value === '') return NaN;
+  return Number(value);
+}
+
 function renderLiveSensor(key, values) {
   const spec = LIVE_SENSORS[key];
   if (!spec) return;
@@ -189,7 +217,7 @@ function renderLiveSensor(key, values) {
 
   for (let i = 0; i < count; i += 1) {
     const raw = values[i];
-    const number = Number(raw);
+    const number = channelNumber(raw);
     const tracked = Boolean(spec.checks) && !untracked.includes(i);
 
     if (tracked && Number.isFinite(number)) {
@@ -239,6 +267,10 @@ function resetLiveSensorPasses() {
       span.classList.remove('pass');
     }
   }
+  // A button held while the script was restarted would never get its release
+  // line, and the column would stay orange for the rest of the session.
+  resetButtonsPressed();
+  renderButtonsRow();
 }
 
 /**
@@ -250,6 +282,192 @@ function resetLiveSensorRanges() {
   for (const key of Object.keys(liveSensorRanges)) {
     delete liveSensorRanges[key];
   }
+  // The buttons row is not refreshed by the sensor stream: without this it
+  // would keep showing the values, and the colours, of the robot that has just
+  // left the bench.
+  resetButtonsPressed();
+  renderButtonsRow();
+}
+
+// ==========================================
+// TOUCH BUTTONS
+// ==========================================
+
+/**
+ * Column order of the buttons readout, left to right. It matches the order the
+ * touch test asks the operator to press them in, and it is what the label in
+ * index.html has to spell out: the printed lines carry the name of the button,
+ * so this order is a display choice and nothing else.
+ */
+const BUTTON_NAMES = ['left', 'right', 'forward', 'backward', 'center'];
+
+const BUTTON_COLUMN = new Map(BUTTON_NAMES.map((name, index) => [name, index]));
+
+/**
+ * One line per press, printed by monitor_touch() when the button is released:
+ *
+ *   forward min: 874 , max: 1980
+ *
+ * The channel is inverted: the raw value drops on a press and climbs back on
+ * release. The maximum is therefore the resting baseline, accumulated on every
+ * loop cycle since the script started, and the minimum is the deepest point of
+ * the press. A working button shows a wide gap between the two.
+ */
+const BUTTON_RAW_RE =
+  /^\s*(left|right|forward|backward|center)\s+min:\s*(-?\d+)\s*,?\s*max:\s*(-?\d+)\s*$/i;
+
+/**
+ * Printed while the button is held, on its own, ahead of the readout above:
+ *
+ *   forward pressed
+ *
+ * It carries no value, and it is not meant to: it is what lets the row say
+ * "measuring" during the press, while the numbers are still being collected.
+ */
+const BUTTON_PRESSED_RE =
+  /^\s*(left|right|forward|backward|center)\s+pressed\s*$/i;
+
+/**
+ * A press has to move the raw value by at least this much, resting minus
+ * pressed, before the channel passes. Being reported as pressed only says the
+ * firmware saw a touch; the swing is what says the pad actually couples. A
+ * channel that answers with a shallow delta is the failure this catches.
+ */
+const BUTTON_RAW_DELTA_MIN = 50;
+
+/**
+ * Highest value a button channel can legitimately report. It is not a test
+ * criterion, it is a corruption guard: a saturated stdout pipe can drop the
+ * characters between two printed lines and hand over a line whose number is two
+ * numbers glued together. One such reading is permanent, because the maximum
+ * only ever grows, on the robot as well as here.
+ */
+const BUTTON_RAW_CEILING = 4095;
+
+/**
+ * Channels currently held down. Set by the pressed line and cleared by the
+ * readout that follows it on release, so it says "a measurement is running",
+ * not "this button works" — the verdict is the job of the extremes.
+ */
+let buttonsPressed = new Array(5).fill(false);
+
+function resetButtonsPressed() {
+  buttonsPressed = new Array(LIVE_SENSORS.buttons.count).fill(false);
+}
+
+/**
+ * One column per button, pressed value over resting value, each carrying its
+ * own verdict as a background colour:
+ *
+ *   orange   held down right now, the measurement is still running
+ *   green    released, and the swing cleared BUTTON_RAW_DELTA_MIN
+ *   red      released, and the swing did not
+ *   plain    never pressed since this robot was connected
+ *
+ * The verdict is recomputed from the extremes rather than latched. They only
+ * ever widen, so a channel that has passed stays passed, and unlike a latch it
+ * cannot fall out of step with the numbers printed next to it when the script
+ * is restarted mid-session.
+ */
+function renderButtonsRow() {
+  const spec = LIVE_SENSORS.buttons;
+  const el = document.getElementById(spec.elementId);
+  if (!el) return;
+
+  const bounds = rangesFor('buttons', spec.count);
+  const spans = channelSpans(el, spec.count);
+
+  el.style.setProperty('--ch-width', `${spec.width}ch`);
+
+  for (let i = 0; i < spec.count; i += 1) {
+    const channel = bounds[i];
+    const seen = channel.min !== null && channel.max !== null;
+    const text = seen
+      ? `${formatChannel(channel.min)}/${formatChannel(channel.max)}`
+      : '-';
+
+    // Touch the DOM only on an actual change.
+    if (spans[i].textContent !== text) spans[i].textContent = text;
+
+    const measuring = buttonsPressed[i];
+    const passed = seen && channel.max - channel.min >= BUTTON_RAW_DELTA_MIN;
+
+    spans[i].classList.toggle('measuring', measuring);
+    spans[i].classList.toggle('ok', !measuring && passed);
+    spans[i].classList.toggle('fail', !measuring && seen && !passed);
+  }
+}
+
+/**
+ * Marks a channel as being pressed right now. The values are left untouched:
+ * the robot is still accumulating them and will print them on release.
+ */
+function noteButtonPressed(column) {
+  if (buttonsPressed[column]) return; // repeats while held, redraw once
+  buttonsPressed[column] = true;
+  renderButtonsRow();
+}
+
+/**
+ * Records one printed button readout: the deepest press and the highest resting
+ * value seen so far. The extremes are merged rather than overwritten, so the row
+ * survives the script being restarted: the robot seeds its own accumulators
+ * again at every run, the bench keeps what this robot has been shown to do since
+ * it was connected, exactly like the other groups.
+ *
+ * The verdict is taken on the merged extremes, not on the single line: the
+ * operator can press lightly first and properly afterwards, and the deepest
+ * press of the session is the one that counts.
+ */
+function noteButtonRaw(column, min, max) {
+  const spec = LIVE_SENSORS.buttons;
+  const bounds = rangesFor('buttons', spec.count);
+
+  if (Number.isFinite(min) && (bounds[column].min === null || min < bounds[column].min)) {
+    bounds[column].min = min;
+  }
+  if (Number.isFinite(max) && (bounds[column].max === null || max > bounds[column].max)) {
+    bounds[column].max = max;
+  }
+
+  // The readout is printed on release, so it ends the measurement it belongs to.
+  buttonsPressed[column] = false;
+
+  renderButtonsRow();
+}
+
+/**
+ * True when the line belonged to the touch test and has been consumed. Those
+ * lines are kept out of the log on purpose: the press line repeats for as long
+ * as the button is held and the row already shows the state. A readout rejected
+ * by the ceiling is the exception and is logged, since it is the only trace of
+ * the corruption left.
+ */
+function applyButtonStdoutLine(line) {
+  const pressed = BUTTON_PRESSED_RE.exec(line);
+  if (pressed) {
+    const column = BUTTON_COLUMN.get(pressed[1].toLowerCase());
+    if (column === undefined) return false;
+    noteButtonPressed(column);
+    return true;
+  }
+
+  const match = BUTTON_RAW_RE.exec(line);
+  if (!match) return false;
+
+  const column = BUTTON_COLUMN.get(match[1].toLowerCase());
+  if (column === undefined) return false;
+
+  const min = Number(match[2]);
+  const max = Number(match[3]);
+
+  if (min > BUTTON_RAW_CEILING || max > BUTTON_RAW_CEILING) {
+    appendLog(`dropped corrupted button readout: ${line.trim()}`);
+    return true;
+  }
+
+  noteButtonRaw(column, min, max);
+  return true;
 }
 
 /**
@@ -360,9 +578,21 @@ async function copyLog() {
   setTimeout(() => { els.btnLogCopy.textContent = label; }, 1200);
 }
 
-function buildScript(type, mode) {
-  const source = scripts[type];
-  return mode ? source.replace('__TEST_MODE__', mode) : source;
+/**
+ * Fills in the placeholders the scripts carry.
+ *
+ *   mode                 test.py, replaces __TEST_MODE__
+ *   options.skipLrReset  calib.py, replaces __SKIP_LR_RESET__: '1' tells the
+ *                        robot to leave the stored L/R straight calibration
+ *                        alone in reset_previous_calibrations()
+ */
+function buildScript(type, mode, options = {}) {
+  let source = scripts[type];
+  if (mode) source = source.replace('__TEST_MODE__', mode);
+  if (type === 'calib') {
+    source = source.replace('__SKIP_LR_RESET__', options.skipLrReset ? '1' : '0');
+  }
+  return source;
 }
 
 function setBusy(busy) {
@@ -372,6 +602,7 @@ function setBusy(busy) {
   els.btnTestLow.disabled = busy;
   els.btnTestTouch.disabled = busy;
   els.btnCalib.disabled = busy;
+  els.btnCalibNoLr.disabled = busy;
 }
 
 /**
@@ -800,6 +1031,10 @@ document.addEventListener('thymio-std-out-values', (event) => {
   const logLines = [];
 
   for (const line of lines) {
+    // Touch test readouts: same treatment as the angle, Live Sensors only.
+    if (applyButtonStdoutLine(line)) {
+      continue;
+    }
     if (line.includes('=')) {
       const eqIndex = line.indexOf('=');
       const key = line.substring(0, eqIndex).trim();
@@ -1300,7 +1535,7 @@ async function sendRecord(record, generation, what) {
   setLogStatus(`${what} NOT saved`, 'ok');
 }
 
-async function runScript(type, mode = null) {
+async function runScript(type, mode = null, options = {}) {
   if (!thymio.isConnected()) {
     alert('Connect to a Thymio 3 first.');
     return;
@@ -1336,8 +1571,9 @@ async function runScript(type, mode = null) {
       startCalibrationSession();
     }
 
-    const script = buildScript(type, mode);
-    console.log(`Uploading ${type}${mode ? '/' + mode : ''} script ` +
+    const script = buildScript(type, mode, options);
+    console.log(`Uploading ${type}${mode ? '/' + mode : ''}` +
+              `${options.skipLrReset ? '/no-lr-reset' : ''} script ` +
               `(${new TextEncoder().encode(script).length} bytes)`);
 
     await thymio.sendPythonScript(script);
@@ -1375,6 +1611,8 @@ els.btnTestMain.addEventListener('click', () => runTest('main'));
 els.btnTestLow.addEventListener('click', () => runTest('low'));
 els.btnTestTouch.addEventListener('click', () => runTest('touch'));
 els.btnCalib.addEventListener('click', () => runScript('calib'));
+els.btnCalibNoLr.addEventListener('click',
+  () => runScript('calib', null, { skipLrReset: true }));
 els.btnStop.addEventListener('click', async () => {
   try {
     readbackActive = false;
