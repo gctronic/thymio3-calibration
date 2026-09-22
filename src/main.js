@@ -66,9 +66,9 @@ const LOG_PLACEHOLDER = 'Waiting for data...';
  *              exercise the ends of the range one after the other and the
  *              channel turns green only once all of them have been seen.
  *   untracked  channel indexes excluded from the checks
- *   minStart   seed for the logged minimum, instead of the first reading. Set
- *              on the sensors that idle at the bottom of their scale, so the
- *              minimum starts high and is only lowered by a real reading.
+ *   minStart   seed for the logged minimum, at or above the top of the sensor
+ *              scale: a minimum still sitting there says the channel never
+ *              went below it, it was not clamped by the seed.
  *
  * A channel with no checks is only formatted, never coloured.
  */
@@ -79,14 +79,14 @@ const LIVE_SENSORS = {
     width: 4,
     // Proven when the sensor both goes fully dark and saturates.
     checks: [(v) => v <= 0, (v) => v > 3500],
-    minStart: 1000,
+    minStart: 99999,
   },
   ground: {
     elementId: 'lbl-ground',
     count: 2,
     width: 4,
     checks: [(v) => v <= 10, (v) => v >= 300],
-    minStart: 1000,
+    minStart: 99999,
   },
   color: {
     elementId: 'lbl-color',
@@ -94,7 +94,7 @@ const LIVE_SENSORS = {
     width: 5,
     checks: [(v) => v < 50, (v) => v > 180],
     untracked: [3], // clear channel: not part of the acceptance criteria
-    minStart: 1000,
+    minStart: 99999,
   },
   accel: {
     elementId: 'lbl-accel',
@@ -102,16 +102,19 @@ const LIVE_SENSORS = {
     width: 6,
     // One axis at a time: all three green means every axis reached 1 g.
     checks: [(v) => Math.abs(v) >= 15900],
+    minStart: 32767,
   },
   gyro: {
     elementId: 'lbl-gyro-rate',
     count: 3,
     width: 6,
+    minStart: 32767,
   },
   angle: {
     elementId: 'lbl-angle-deg',
     count: 1,
     width: 4,
+    minStart: 360,
   },
   // Touch buttons. Unlike every other group this one is not fed by the sensor
   // stream but by the lines the touch test prints, so its channels are filled
@@ -125,8 +128,7 @@ const LIVE_SENSORS = {
     // is judged on the swing between its two extremes. renderButtonsRow() takes
     // that verdict straight from the extremes, so there is no latch to keep in
     // step with them across a script restart.
-    // No minStart either, unlike the streamed groups: the minimum of a button is
-    // its pressed value, and a seed would sit below it and never be replaced.
+    minStart: 99999,
   },
 };
 
@@ -134,10 +136,14 @@ const LIVE_SENSORS = {
 const liveSensorLatches = {};
 
 // key -> per channel { min, max } of every finite value seen since the robot
-// was connected. Unlike the latches, these survive a script start: a test record
-// is meant to carry everything the operator has exercised on this robot, not
-// only what happened after the last button press. Cleared on disconnection.
-const liveSensorRanges = {};
+// was connected. Unlike the latches, these survive a script start: the test
+// record sent at disconnection carries everything the operator has exercised on
+// this robot during the whole session.
+const sessionRanges = {};
+
+// Same shape, but only what the operator is shown: cleared at every script
+// start, so the readout belongs to the test that is running. Never sent.
+const displayRanges = {};
 
 function latchesFor(key, count) {
   const spec = LIVE_SENSORS[key];
@@ -152,17 +158,23 @@ function latchesFor(key, count) {
   return latch;
 }
 
-function rangesFor(key, count) {
+function rangesFor(store, key, count) {
   const spec = LIVE_SENSORS[key];
   const minStart = spec.minStart === undefined ? null : spec.minStart;
-  let bounds = liveSensorRanges[key];
+  let bounds = store[key];
 
   if (!bounds || bounds.length !== count) {
     bounds = Array.from({ length: count }, () => ({ min: minStart, max: null }));
-    liveSensorRanges[key] = bounds;
+    store[key] = bounds;
   }
 
   return bounds;
+}
+
+function clearRanges(store) {
+  for (const key of Object.keys(store)) {
+    delete store[key];
+  }
 }
 
 /**
@@ -212,7 +224,7 @@ function renderLiveSensor(key, values) {
 
   const count = spec.count || values.length;
   const latch = latchesFor(key, count);
-  const bounds = rangesFor(key, count);
+  const bounds = rangesFor(sessionRanges, key, count);
   const untracked = spec.untracked || [];
   const spans = channelSpans(el, count);
 
@@ -257,12 +269,14 @@ function initLiveSensors() {
 
 /**
  * Called when a new robot goes on the bench and at every script start: the
- * green marks belong to one run and must not be inherited by the next one.
+ * green marks and the displayed extremes belong to one run and must not be
+ * inherited by the next one. The session extremes are left alone.
  */
 function resetLiveSensorPasses() {
   for (const key of Object.keys(liveSensorLatches)) {
     delete liveSensorLatches[key];
   }
+  clearRanges(displayRanges);
   for (const spec of Object.values(LIVE_SENSORS)) {
     const el = document.getElementById(spec.elementId);
     if (!el) continue;
@@ -276,21 +290,6 @@ function resetLiveSensorPasses() {
   renderButtonsRow();
 }
 
-/**
- * Called on disconnection only. The extremes describe one robot's whole stay on
- * the bench, across as many test runs as the operator needs, so they must not be
- * cleared by a script start the way the green marks are.
- */
-function resetLiveSensorRanges() {
-  for (const key of Object.keys(liveSensorRanges)) {
-    delete liveSensorRanges[key];
-  }
-  // The buttons row is not refreshed by the sensor stream: without this it
-  // would keep showing the values, and the colours, of the robot that has just
-  // left the bench.
-  resetButtonsPressed();
-  renderButtonsRow();
-}
 
 // ==========================================
 // TOUCH BUTTONS
@@ -365,19 +364,18 @@ function resetButtonsPressed() {
  *   orange   held down right now, the measurement is still running
  *   green    released, and the swing cleared BUTTON_RAW_DELTA_MIN
  *   red      released, and the swing did not
- *   plain    never pressed since this robot was connected
+ *   plain    never pressed since the current test started
  *
- * The verdict is recomputed from the extremes rather than latched. They only
- * ever widen, so a channel that has passed stays passed, and unlike a latch it
- * cannot fall out of step with the numbers printed next to it when the script
- * is restarted mid-session.
+ * The verdict is recomputed from the displayed extremes rather than latched.
+ * They only widen during a run, so a channel that has passed stays passed until
+ * the next script start clears the row.
  */
 function renderButtonsRow() {
   const spec = LIVE_SENSORS.buttons;
   const el = document.getElementById(spec.elementId);
   if (!el) return;
 
-  const bounds = rangesFor('buttons', spec.count);
+  const bounds = rangesFor(displayRanges, 'buttons', spec.count);
   const spans = channelSpans(el, spec.count);
 
   el.style.setProperty('--ch-width', `${spec.width}ch`);
@@ -413,24 +411,24 @@ function noteButtonPressed(column) {
 
 /**
  * Records one printed button readout: the deepest press and the highest resting
- * value seen so far. The extremes are merged rather than overwritten, so the row
- * survives the script being restarted: the robot seeds its own accumulators
- * again at every run, the bench keeps what this robot has been shown to do since
- * it was connected, exactly like the other groups.
+ * value seen so far, merged into both the displayed extremes (this run) and the
+ * session ones (sent at disconnection), exactly like the other groups.
  *
  * The verdict is taken on the merged extremes, not on the single line: the
  * operator can press lightly first and properly afterwards, and the deepest
- * press of the session is the one that counts.
+ * press is the one that counts.
  */
 function noteButtonRaw(column, min, max) {
   const spec = LIVE_SENSORS.buttons;
-  const bounds = rangesFor('buttons', spec.count);
 
-  if (Number.isFinite(min) && (bounds[column].min === null || min < bounds[column].min)) {
-    bounds[column].min = min;
-  }
-  if (Number.isFinite(max) && (bounds[column].max === null || max > bounds[column].max)) {
-    bounds[column].max = max;
+  for (const store of [displayRanges, sessionRanges]) {
+    const bounds = rangesFor(store, 'buttons', spec.count);
+    if (Number.isFinite(min) && (bounds[column].min === null || min < bounds[column].min)) {
+      bounds[column].min = min;
+    }
+    if (Number.isFinite(max) && (bounds[column].max === null || max > bounds[column].max)) {
+      bounds[column].max = max;
+    }
   }
 
   // The readout is printed on release, so it ends the measurement it belongs to.
@@ -474,7 +472,7 @@ function applyButtonStdoutLine(line) {
 }
 
 /**
- * The extremes as they stand right now, one printed list per sensor group and
+ * The session extremes as they stand right now, one printed list per sensor group and
  * per bound, in the same shape the sheet already uses for coupled calibration
  * values. A channel that never produced a finite reading prints '-' on both
  * bounds: the seeded minimum of a silent channel would otherwise read as a
@@ -484,7 +482,7 @@ function liveSensorRangeValues() {
   const values = {};
 
   for (const [key, spec] of Object.entries(LIVE_SENSORS)) {
-    const bounds = liveSensorRanges[key];
+    const bounds = sessionRanges[key];
     const mins = [];
     const maxs = [];
 
@@ -659,6 +657,11 @@ async function connectAndStream() {
     // Settle GATT before enabling notifications traffic
     setTimeout(async () => {
       try {
+        // A script can still be running from before: a page refresh, or a
+        // disconnection, leaves it going on the robot, and the full test drives
+        // the motors. The soft reset sent by the connection does not stop it.
+        await stopRunningScript();
+
         // Read the firmware version while the link is still idle: once sensor
         // streaming is running, the notification traffic makes this request
         // time out on macOS.
@@ -678,7 +681,25 @@ async function connectAndStream() {
   }
 }
 
+/**
+ * Stops whatever script the robot is running. Bounded in time: it is called on
+ * the way out, where an unanswered request must not hold up the disconnection.
+ */
+async function stopRunningScript() {
+  try {
+    await Promise.race([
+      thymio.stopScriptExecution(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
+    ]);
+  } catch (err) {
+    console.warn('Stop script failed', err);
+  }
+}
+
 async function handleDisconnect() {
+  // A script left running keeps going after the link is closed: the full test
+  // would keep driving the motors with nobody at the bench.
+  await stopRunningScript();
   try {
     await thymio.disconnect();
   } catch (err) {
@@ -695,6 +716,7 @@ document.addEventListener('thymio-connected', (event) => {
   els.btnConnect.disabled = false;
   // New robot on the bench: nothing has been proven on it yet.
   resetLiveSensorPasses();
+  startTestSession();
   console.log('Thymio link active.');
 });
 
@@ -711,9 +733,10 @@ document.addEventListener('thymio-disconnected', () => {
   // disconnection may finalize is already stamped as belonging to a robot that
   // has left: it gets the attempt in flight and no retries.
   connectionGeneration++;
+  // Sent before anything is cleared: the extremes belong to the robot that has
+  // just left the bench.
+  sendTestSession(false);
   resetLiveSensorPasses();
-  // The extremes belong to the robot that has just left the bench.
-  resetLiveSensorRanges();
   renderNotices();
   abortCalibrationSession('Disconnected');
   console.warn('Thymio link lost.');
@@ -1401,31 +1424,67 @@ const TEST_LABELS = {
   touch: 'Touch test',
 };
 
+// One session per connection: every test started while the robot is on the
+// bench, and the sensor extremes of the whole stay (sessionRanges).
+let testSession = null;
+
+function startTestSession() {
+  clearRanges(sessionRanges);
+  testSession = {
+    robot: thymio.getDeviceName(),
+    tests: [],
+  };
+}
+
+function noteTestRun(mode) {
+  if (!testSession) return;
+  const label = TEST_LABELS[mode] || mode;
+  if (!testSession.tests.includes(label)) testSession.tests.push(label);
+}
+
 /**
- * Logs one test run. Taken at the button press, so the extremes are the ones the
- * operator has just been looking at: everything the sensors have done since this
- * robot was connected, including the previous test runs of the same robot.
+ * Sends the session record, once: the session is dropped before the upload, so
+ * a second call (disconnection event after pagehide, or the other way round)
+ * finds nothing. A session in which no test was started is not logged.
  *
- * Fire and forget on purpose: the upload must never delay the script upload the
- * operator actually pressed the button for.
+ * On pagehide the page is going away and a fetch would be cancelled with it:
+ * sendBeacon is the one request the browser completes after the page is gone.
+ * It carries no answer, hence no retry.
  */
-function logTestRun(mode) {
-  if (!thymio.isConnected()) return;
+function sendTestSession(pageClosing) {
+  const session = testSession;
+  testSession = null;
+  if (!session || session.tests.length === 0) return;
 
   const record = {
     // Read by calib_log.php and calib_log.gs: a record without it is a
     // calibration and goes to the calibration tab.
     kind: 'test',
-    // Identity of this run, repeated unchanged by every retry, so a lost
+    // Identity of this session, repeated unchanged by every retry, so a lost
     // response cannot produce a second row.
     run_id: crypto.randomUUID(),
-    robot: thymio.getDeviceName(),
-    test: TEST_LABELS[mode] || mode,
+    robot: session.robot,
+    test: session.tests.join(', '),
     values: liveSensorRangeValues(),
   };
 
+  if (pageClosing) {
+    const body = JSON.stringify({ token: CALIB_LOG.token, record: record });
+    navigator.sendBeacon(CALIB_LOG.url, new Blob([body], { type: 'text/plain;charset=utf-8' }));
+    return;
+  }
+
   sendRecord(record, connectionGeneration, 'Test');
 }
+
+// A refresh or a closed tab drops the link without always giving the
+// disconnection event a chance to run.
+// The stop is best effort: the page may be gone before the write goes out. The
+// next connection stops the script anyway.
+window.addEventListener('pagehide', () => {
+  sendTestSession(true);
+  if (thymio.isConnected()) stopRunningScript();
+});
 
 // ==========================================
 // CALIBRATION READBACK
@@ -1670,11 +1729,11 @@ async function runScript(type, mode = null, options = {}) {
 }
 
 /**
- * A test button logs the run and then starts the script. The record is taken
- * first, before anything on the bench changes.
+ * A test button adds the test to the session and starts the script. Nothing is
+ * sent here: the session record goes out at disconnection.
  */
 function runTest(mode) {
-  logTestRun(mode);
+  noteTestRun(mode);
   runScript('test', mode);
 }
 

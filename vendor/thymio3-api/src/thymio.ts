@@ -189,6 +189,10 @@ async function retryConnection() {
       if (!device.gatt!.connected) {
         await connect();
         await probeWriteMtu();
+        // The script that was running when the link dropped is still going
+        // (the probe's soft reset does not stop it): it may be driving the
+        // motors, and nobody knows the robot is back.
+        await stopScriptExecution();
         reconnecting = false;
         return;
       }
