@@ -120,6 +120,30 @@ body {
   gap: 8px;
 }
 
+/* Robot id barcode and QR code: each SVG carries its own white background and
+   quiet zone. */
+#robot-barcode {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#robot-barcode svg {
+  display: block;
+}
+
+/* Shown in place of the barcode when the BLE name carries no usable id. */
+#robot-barcode.robot-id-warning {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 999px;
+  color: var(--warn-dark);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+}
+
 /* Status pill: the dot is readable at a glance from across the bench. */
 #connection-status {
   font-family: var(--font-mono);

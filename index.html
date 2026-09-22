@@ -19,10 +19,13 @@
     <header class="header">
       <div class="header-title">
         <h1>Thymio 3 Test and Calibration</h1>
-        <span class="version">14.09.26v1</span>
+        <span class="version">22.09.26v1</span>
       </div>
 
       <div class="header-connection">
+        <!-- Code 128 and QR code of the robot id (BLE name without "THYMIO3-"),
+             filled on connection, or a warning when the robot has no valid id. -->
+        <div id="robot-barcode" hidden></div>
         <div id="connection-status" class="status-disconnected">Disconnected</div>
         <button id="btn-connect">Connect to Robot</button>
         <button id="btn-disconnect" class="stop" hidden>Disconnect</button>

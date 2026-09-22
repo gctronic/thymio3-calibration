@@ -1,6 +1,8 @@
 import * as thymio from '@local/thymio3-api';
 import testScript from './scripts/test.py?raw';
 import calibScript from './scripts/calib.py?raw';
+import { code128Svg } from './barcode.js';
+import { qrCodeSvg } from './qrcode.js';
 
 const scripts = {
   test: testScript,
@@ -23,6 +25,7 @@ const els = {
   statusText: document.getElementById('upload-status-text'),
   progressText: document.getElementById('upload-progress-text'),
   connectionStatus: document.getElementById('connection-status'),
+  robotBarcode: document.getElementById('robot-barcode'),
   stdOut: document.getElementById('std-out-output'),
   calibPanel: document.getElementById('calibration-panel'),
   calibTitle: document.getElementById('calibration-title'),
@@ -615,6 +618,36 @@ function setConnectionUi(connected, statusText) {
 
   els.connectionStatus.textContent = statusText;
   els.connectionStatus.className = connected ? 'status-connected' : 'status-disconnected';
+
+  renderRobotBarcode(connected ? thymio.getDeviceName() : null);
+}
+
+// BLE name "THYMIO3-AA10001": lot (two letters) followed by the robot number
+// (0-65535). The barcode and the QR code carry the part after the prefix,
+// number padded to five digits. A robot that was never given an id advertises "THYMIO3-UndefID".
+const ROBOT_ID_RE = /^THYMIO3-([A-Z]{2})(\d{1,5})$/;
+const ROBOT_ID_UNDEFINED = 'THYMIO3-UndefID';
+const ROBOT_NUMBER_MAX = 65535;
+
+function renderRobotBarcode(deviceName) {
+  const el = els.robotBarcode;
+  el.hidden = !deviceName;
+  el.classList.remove('robot-id-warning');
+  el.replaceChildren();
+  if (!deviceName) return;
+
+  const match = ROBOT_ID_RE.exec(deviceName);
+  if (match && Number(match[2]) <= ROBOT_NUMBER_MAX) {
+    const robotId = match[1] + match[2].padStart(5, '0');
+    el.innerHTML = code128Svg(robotId) + qrCodeSvg(robotId, { moduleSize: 2.6 });
+    return;
+  }
+
+  // No codes: a wrong code on the robot's record is worse than none.
+  el.classList.add('robot-id-warning');
+  el.textContent = deviceName === ROBOT_ID_UNDEFINED
+    ? 'Robot ID not assigned'
+    : `Invalid robot ID: ${deviceName}`;
 }
 
 async function connectAndStream() {
@@ -671,6 +704,7 @@ document.addEventListener('thymio-disconnected', () => {
   setBusy(false);
   lastFirmwareInfo = null;
   readbackActive = false;
+  resetStdoutBuffer();
   // The last reading belongs to a robot that is no longer on the bench.
   batteryMillivolts = null;
   // Bumped before the session is closed, so that the record this very
@@ -1025,8 +1059,46 @@ function updateCalibrationStatus(stdoutText) {
   applyCalibrationVerdict();
 }
 
+// A BLE notification carries an arbitrary slice of stdout, not whole lines: a
+// report line can be split across two of them ("mot forw" + "ard = 8512345").
+// Parsed one notification at a time, such a line was lost or truncated, which
+// is what left holes in the sheet. Only complete lines are processed; the tail
+// waits here for the rest, or for the flush timer if no newline ever comes.
+const STDOUT_FLUSH_MS = 300;
+let stdoutPending = '';
+let stdoutFlushTimer = null;
+
+function resetStdoutBuffer() {
+  clearTimeout(stdoutFlushTimer);
+  stdoutFlushTimer = null;
+  stdoutPending = '';
+}
+
+function flushStdoutBuffer() {
+  stdoutFlushTimer = null;
+  const text = stdoutPending;
+  stdoutPending = '';
+  if (text) processStdoutLines(text);
+}
+
 document.addEventListener('thymio-std-out-values', (event) => {
-  const outputText = String(event.detail);
+  stdoutPending += String(event.detail);
+  clearTimeout(stdoutFlushTimer);
+  stdoutFlushTimer = null;
+
+  const lastNewline = stdoutPending.lastIndexOf('\n');
+  if (lastNewline !== -1) {
+    const complete = stdoutPending.substring(0, lastNewline + 1);
+    stdoutPending = stdoutPending.substring(lastNewline + 1);
+    processStdoutLines(complete);
+  }
+
+  if (stdoutPending) {
+    stdoutFlushTimer = setTimeout(flushStdoutBuffer, STDOUT_FLUSH_MS);
+  }
+});
+
+function processStdoutLines(outputText) {
   const lines = outputText.split('\n');
   const logLines = [];
 
@@ -1076,7 +1148,7 @@ document.addEventListener('thymio-std-out-values', (event) => {
 
   updateCalibrationStatus(outputText);
   feedCalibrationSession(outputText);
-});
+}
 
 // ==========================================
 // CALIBRATION LOGGING (Google Sheets)
@@ -1442,6 +1514,7 @@ async function runCalibrationReadback(keys) {
     } catch (err) {
       console.warn('Stop before readback failed, continuing', err);
     }
+    resetStdoutBuffer();
 
     await thymio.sendPythonScript(script);
     await thymio.executeLoadedScript();
@@ -1562,6 +1635,7 @@ async function runScript(type, mode = null, options = {}) {
 
     els.statusText.textContent = 'Uploading script to Thymio...';
     els.stdOut.textContent = LOG_PLACEHOLDER;
+    resetStdoutBuffer();
 
     // A test run must not be absorbed by a calibration session left open.
     if (type !== 'calib') {

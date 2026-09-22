@@ -5,7 +5,7 @@ export function handleStdOutResponse(event: Event) {
 
   if (value) {
     const decoder = new TextDecoder();
-    const stdOut = decoder.decode(value.buffer);
+    const stdOut = decoder.decode(value);
 
     const stdOutEvent = new CustomEvent(THYMIO_STD_OUT_EVENT_ID, {
       detail: stdOut

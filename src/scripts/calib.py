@@ -25,7 +25,7 @@ SKIP_LR_RESET = "__SKIP_LR_RESET__"
 if SKIP_LR_RESET.startswith("__"):
     SKIP_LR_RESET = "0"
 
-SCRIPT_VERSION = "14.09.26v1"
+SCRIPT_VERSION = "22.09.26v1"
 
 CALIB_LR_FACTOR = 150
 CALIB_FWBW_MOT_SPEED = 300
@@ -50,6 +50,8 @@ GYRO_OFFSET_POLL_SEC = 0.1
 DEFAULT_GROUND_BLACK = 35
 DEFAULT_GROUND_WHITE = 300
 MAX_BRIGHTNESS = 16
+
+PRINT_DELAY = 0.1
 
 mot = thymio.MOTORS()
 imu = thymio.IMU()
@@ -554,52 +556,61 @@ while 1:
 
         if ok_mot_lr == 1:
             print("mot left = " + str(int(calibLeft)))
+            time.sleep(PRINT_DELAY)
             print("mot right = " + str(int(calibRight)))
+            time.sleep(PRINT_DELAY)
             mot.save_straight_calibration()
-            print("mot L/R straight SAVED to flash")
+            print("mot L/R straight SAVED")
         else:
-            print("mot L/R straight NOT SAVED (calibration failed or not reached)")
+            print("mot L/R straight NOT SAVED")
 
         if ok_gyro == 1:
             print("imu scaling = " + str(imu_angle_diff))
+            time.sleep(PRINT_DELAY)
             imu.save_gyro_scale_calib()
-            print("imu gyro scale SAVED to flash")
+            print("imu gyro scale SAVED")
         else:
-            print("imu gyro scale NOT SAVED (calibration failed or not reached)")
+            print("imu gyro scale NOT SAVED")
         print("imu offsets = " + str(imu.get_gyro_calib()))
+        time.sleep(PRINT_DELAY)
         imu.save_gyro_calib()
-        print("imu gyro offsets SAVED to flash")
+        print("imu gyro offsets SAVED")
         imu.enable_gyro_auto_calib()
 
         if ok_mot_dist_fw == 1:
             print("mot forward = " + str(calib_mot_fw_time))
+            time.sleep(PRINT_DELAY)
         if ok_mot_dist_bw == 1:
             print("mot backward = " + str(calib_mot_bw_time))
+            time.sleep(PRINT_DELAY)
         if ok_mot_dist_fw == 1 and ok_mot_dist_bw == 1:
             mot.set_distance_calibration(calib_mot_fw_time, calib_mot_bw_time)
             mot.save_distance_calibration()
-            print("mot distance fw/bw SAVED to flash")
+            print("mot distance fw/bw SAVED")
         else:
-            print("mot distance fw/bw NOT SAVED (calibration failed or not reached; fw_ok:" +
-                  str(ok_mot_dist_fw) + " bw_ok:" + str(ok_mot_dist_bw) + ")")
+            print("mot distance fw/bw NOT SAVED; fw_ok:" +
+                  str(ok_mot_dist_fw) + " bw_ok:" + str(ok_mot_dist_bw))
 
         print("color calib = " + str(color.get_calibration()))
+        time.sleep(PRINT_DELAY)
         if ok_color_white == 1:
-            print("color white SAVED to flash (during run)")
+            print("color white SAVED during run")
         else:
-            print("color white NOT SAVED (calibration failed or not reached)")
+            print("color white NOT SAVED")
         if ok_color_black == 1:
-            print("color black SAVED to flash (during run)")
+            print("color black SAVED during run")
         else:
-            print("color black NOT SAVED (calibration failed or not reached)")
+            print("color black NOT SAVED")
 
         if ok_ground == 1:
             print("ground black = " + str(ground_black))
+            time.sleep(PRINT_DELAY)
             print("ground white = " + str(ground_white))
+            time.sleep(PRINT_DELAY)
             g0.save_calibration_from_values()
-            print("ground sensors SAVED to flash")
+            print("ground sensors SAVED")
         else:
-            print("ground sensors NOT SAVED (calibration failed or not reached)")
+            print("ground sensors NOT SAVED")
 
         print("calibration report end")
         break
