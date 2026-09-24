@@ -620,10 +620,10 @@ function setConnectionUi(connected, statusText) {
   renderRobotBarcode(connected ? thymio.getDeviceName() : null);
 }
 
-// BLE name "THYMIO3-AA10001": lot (two letters) followed by the robot number
-// (0-65535). The barcode and the QR code carry the part after the prefix,
-// number padded to five digits. A robot that was never given an id advertises "THYMIO3-UndefID".
-const ROBOT_ID_RE = /^THYMIO3-([A-Z]{2})(\d{1,5})$/;
+// BLE name "THYMIO3-AA10001": lot (two letters, either case) followed by the robot
+// number (0-65535). The barcode and the QR code carry the part after the prefix
+// as read (lot case preserved), number padded to five digits. A robot that was never given an id advertises "THYMIO3-UndefID".
+const ROBOT_ID_RE = /^THYMIO3-([A-Za-z]{2})(\d{1,5})$/;
 const ROBOT_ID_UNDEFINED = 'THYMIO3-UndefID';
 const ROBOT_NUMBER_MAX = 65535;
 
